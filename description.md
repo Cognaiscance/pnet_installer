@@ -26,7 +26,8 @@ Solo node (no SG in the directory) may write desire locally.
 
 ```bash
 # After cargo build -p pnet -p pnet_installer, both bins sit in target/debug:
-cargo build -p pnet -p pnet_installer
+cargo build --manifest-path ../pNet/Cargo.toml --bin pnet
+cargo build
 ./target/debug/pnet_installer bootstrap --prefix ~/.pnet --no-start
 # or omit --no-start to launch pnet + agent
 # Create/join: http://127.0.0.1:8777/setup
@@ -38,8 +39,8 @@ cargo build -p pnet -p pnet_installer
 ## Run (agent only)
 
 ```bash
-PNET_AUTO_APPROVE_APPS=1 cargo run -p pnet
-cargo run -p pnet_installer
+PNET_AUTO_APPROVE_APPS=1 cargo run --manifest-path ../pNet/Cargo.toml
+cargo run
 ```
 
 Sign in → Home → **Installer** (or **Store** until the agent is up).

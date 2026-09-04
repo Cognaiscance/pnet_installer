@@ -8,8 +8,8 @@ local binaries). See [description.md](description.md).
 ./pnet_installer bootstrap
 
 # Agent only, pNet already running:
-PNET_AUTO_APPROVE_APPS=1 cargo run -p pnet
-cargo run -p pnet_installer
+PNET_AUTO_APPROVE_APPS=1 cargo run --manifest-path ../pNet/Cargo.toml
+cargo run
 ```
 
 Portal: sign in → Home → **Installer** (`/apps/installer/`).
