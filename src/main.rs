@@ -6,13 +6,16 @@ use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
 use pnet_installer::bootstrap::{self, Cmd};
+use pnet_installer::catalog::Catalog;
 use pnet_installer::fabric::{self, APP_ALIAS};
+use pnet_installer::fetch::UreqFetcher;
 use pnet_installer::proto;
+use pnet_installer::sources;
 use pnet_installer::state::State;
 use pnet_installer::sync::Engine;
 use pnet_installer::web;
@@ -80,12 +83,29 @@ fn run_agent() {
         let _ = ctrlc::set_handler(move || stop.store(true, Ordering::SeqCst));
     }
 
-    let state = State::open(state_dir).unwrap_or_else(|e| panic!("open state: {e}"));
+    let state = State::open(state_dir.clone()).unwrap_or_else(|e| panic!("open state: {e}"));
     println!(
         "[installer] state {}  replica {}  (notify only — will not exec packages)",
         state.dir.display(),
         pnet_installer::state::hex16(&state.replica_id)
     );
+    if let Err(e) = sources::ensure_app_sources(&state_dir) {
+        eprintln!("[installer] app_sources: {e}");
+    } else {
+        println!(
+            "[installer] app_sources {}",
+            sources::sources_dir(&state_dir).display()
+        );
+    }
+    let skip_net = std::env::var("PNET_INSTALLER_NO_NETWORK").ok().as_deref() == Some("1");
+    let catalog = Arc::new(RwLock::new(Catalog::baked()));
+    match Catalog::load(&state_dir, &UreqFetcher, false) {
+        Ok(c) => {
+            println!("[installer] catalog {} apps (cached/fallback)", c.apps.len());
+            *catalog.write().unwrap() = c;
+        }
+        Err(e) => eprintln!("[installer] catalog load: {e}"),
+    }
     let state = Arc::new(Mutex::new(state));
 
     let dest: SocketAddr = pnet_addr.parse().unwrap_or_else(|e| panic!("PNET_ADDR: {e}"));
@@ -157,8 +177,38 @@ fn run_agent() {
 
     {
         let stop = Arc::clone(&stop);
+        let catalog = Arc::clone(&catalog);
+        let dir = state_dir.clone();
+        thread::spawn(move || {
+            if skip_net {
+                return;
+            }
+            // Immediate refresh, then every six hours.
+            loop {
+                match Catalog::load(&dir, &UreqFetcher, true) {
+                    Ok(c) => {
+                        println!("[installer] catalog {} apps (github)", c.apps.len());
+                        *catalog.write().unwrap() = c;
+                    }
+                    Err(e) => eprintln!("[installer] catalog refresh: {e}"),
+                }
+                let mut slept = 0u64;
+                while slept < 6 * 3600 {
+                    if stop.load(Ordering::Acquire) {
+                        return;
+                    }
+                    thread::sleep(Duration::from_secs(1));
+                    slept += 1;
+                }
+            }
+        });
+    }
+
+    {
+        let stop = Arc::clone(&stop);
         let state = Arc::clone(&state);
         let engine = Arc::clone(&engine);
+        let catalog = Arc::clone(&catalog);
         let ctrl = ctrl.try_clone().expect("clone ctrl");
         let alias = alias.clone();
         thread::spawn(move || {
@@ -179,7 +229,8 @@ fn run_agent() {
                     let mut eng = engine.lock().unwrap();
                     if eng.token != [0u8; 16] {
                         if let Some(dir) = eng.dir.clone() {
-                            if st.observe_local(&dir) {
+                            let cat = catalog.read().unwrap_or_else(|e| e.into_inner()).clone();
+                            if st.observe_local(&dir, &cat) {
                                 eng.status_dirty = true;
                             }
                         }
@@ -205,8 +256,9 @@ fn run_agent() {
             Ok((stream, _)) => {
                 let state = Arc::clone(&state);
                 let engine = Arc::clone(&engine);
+                let catalog = Arc::clone(&catalog);
                 thread::spawn(move || {
-                    if let Err(e) = web::handle(stream, &state, &engine) {
+                    if let Err(e) = web::handle(stream, &state, &engine, &catalog) {
                         eprintln!("[installer] http: {e}");
                     }
                 });

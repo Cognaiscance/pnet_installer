@@ -124,7 +124,8 @@ pub fn help_text() -> &'static str {
        --dry-run            Print plan, write nothing\n\
        --http-bind ADDR     PNET_HTTP_BIND for the started node (default 127.0.0.1)\n\
      \n\
-     Phase 3 does not download packages. Signed catalog install is phase 4.\n"
+     Catalog: GitHub URL lists in $PREFIX/installer/app_sources/ (managed pnet.list).\n\
+     Does not download or exec catalog apps (signed install is phase 4).\n"
 }
 
 pub fn resolve_from(opts: &mut Opts, current_exe: &Path) -> Result<(), String> {
@@ -188,6 +189,9 @@ pub fn execute(opts: &Opts, plan: &Plan) -> Result<String, String> {
     fs::create_dir_all(opts.prefix.join("bin")).map_err(|e| e.to_string())?;
     fs::create_dir_all(opts.prefix.join("logs")).map_err(|e| e.to_string())?;
     fs::create_dir_all(opts.prefix.join("run")).map_err(|e| e.to_string())?;
+    let sources = crate::sources::ensure_app_sources(&opts.prefix.join("installer"))
+        .map_err(|e| format!("app_sources: {e}"))?;
+    log.push_str(&format!("app sources {}\n", sources.display()));
 
     for (src, dest, kind) in &plan.copies {
         match kind {
@@ -231,8 +235,10 @@ pub fn execute(opts: &Opts, plan: &Plan) -> Result<String, String> {
 
     log.push_str(&format!(
         "Next: open http://{}:8777/setup to create a user or join with an invite.\n\
-         Then Home → Installer for the catalog (still notify-only for other apps).\n",
-        opts.http_bind
+         Then Home → Installer. Extra apps: drop a GitHub URL list in \
+         {}/app_sources/ (still notify-only).\n",
+        opts.http_bind,
+        opts.prefix.join("installer").display()
     ));
     Ok(log)
 }
@@ -370,6 +376,7 @@ mod tests {
         assert!(sh.contains("PNET_HTTP_BIND=127.0.0.1"));
         assert!(sh.contains("pnet_installer\" run"));
         assert!(prefix.join("bootstrap.json").is_file());
+        assert!(prefix.join("installer/app_sources/pnet.list").is_file());
         // second run without --force keeps existing
         let p2 = plan(&o).unwrap();
         assert!(p2.copies.iter().all(|c| c.2 == CopyKind::SkipExists));

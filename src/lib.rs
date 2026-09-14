@@ -2,9 +2,12 @@
 //! `bootstrap` installs pNet + this agent from a local binary directory.
 
 pub mod bootstrap;
+pub mod card;
 pub mod catalog;
 pub mod fabric;
+pub mod fetch;
 pub mod proto;
+pub mod sources;
 pub mod state;
 pub mod sync;
 pub mod web;

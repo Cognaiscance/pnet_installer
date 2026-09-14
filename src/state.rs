@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog;
+use crate::catalog::{self, Catalog};
 use crate::fabric::DirView;
 
 pub const STATE_PENDING: &str = "pending";
@@ -24,6 +24,10 @@ pub struct DesiredApp {
     pub device_uuids: Vec<String>,
     pub updated_at: u64,
     pub updated_by: String,
+    #[serde(default)]
+    pub github_url: String,
+    #[serde(default)]
+    pub fabric_alias: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,10 +111,11 @@ impl State {
         enabled: bool,
         device_uuids: Vec<String>,
         writer_device: [u8; 16],
+        catalog: &Catalog,
     ) -> Result<(), &'static str> {
-        if catalog::get(catalog_id).is_none() {
+        let Some(cat) = catalog.get(catalog_id) else {
             return Err("unknown_app");
-        }
+        };
         let now = unix_now();
         let by = hex16(&writer_device);
         if let Some(d) = self.desire.iter_mut().find(|d| d.catalog_id == catalog_id) {
@@ -119,6 +124,8 @@ impl State {
             d.updated_at = now;
             d.updated_by = by;
             d.version = "manual".into();
+            d.github_url = cat.github_url.clone();
+            d.fabric_alias = cat.fabric_alias.clone();
         } else {
             self.desire.push(DesiredApp {
                 catalog_id: catalog_id.into(),
@@ -127,17 +134,20 @@ impl State {
                 device_uuids,
                 updated_at: now,
                 updated_by: by,
+                github_url: cat.github_url.clone(),
+                fabric_alias: cat.fabric_alias.clone(),
             });
         }
         let _ = self.persist();
         Ok(())
     }
 
-    /// LWW per catalog_id by `updated_at`.
+    /// LWW per catalog_id by `updated_at`. Unknown local catalog ids are still
+    /// accepted so an org list on the writer can reach other agents.
     pub fn merge_desire(&mut self, incoming: &[DesiredApp]) -> bool {
         let mut changed = false;
         for rem in incoming {
-            if catalog::get(&rem.catalog_id).is_none() {
+            if !catalog::valid_id(&rem.catalog_id) {
                 continue;
             }
             match self
@@ -192,7 +202,7 @@ impl State {
     }
 
     /// Observe local directory vs desire. Notify only — no exec.
-    pub fn observe_local(&mut self, dir: &DirView) -> bool {
+    pub fn observe_local(&mut self, dir: &DirView, catalog: &Catalog) -> bool {
         let local_hex = hex16(&dir.device_uuid);
         let running: Vec<String> = dir
             .devices
@@ -210,21 +220,29 @@ impl State {
         let mut rows = Vec::new();
         for d in &self.desire {
             let wanted = d.enabled && d.device_uuids.iter().any(|u| u == &local_hex);
-            let Some(cat) = catalog::get(&d.catalog_id) else {
+            let cat = catalog.get(&d.catalog_id);
+            let alias = cat
+                .map(|c| c.fabric_alias.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(d.fabric_alias.as_str());
+            if alias.is_empty() {
                 continue;
-            };
-            let present = running.iter().any(|a| a == cat.fabric_alias);
+            }
+            let present = running.iter().any(|a| a == alias);
+            let hint = cat
+                .map(|c| c.github_url.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(d.github_url.as_str());
             let (state, detail) = if wanted && present {
                 (
                     STATE_INSTALLED,
-                    format!("{} registered on this device", cat.fabric_alias),
+                    format!("{alias} registered on this device"),
                 )
             } else if wanted && !present {
                 (
                     STATE_PENDING,
                     format!(
-                        "Desired here. Run `{cmd}` (notify only — agent does not install).",
-                        cmd = cat.crate_name
+                        "Desired here. Clone {hint} and cargo run (notify only — agent does not install)."
                     ),
                 )
             } else if !wanted && present {
@@ -298,6 +316,7 @@ fn random_id() -> [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::Catalog;
     use crate::fabric::{AppView, DevView, DirView};
 
     fn tmp() -> PathBuf {
@@ -333,7 +352,8 @@ mod tests {
     #[test]
     fn desire_lww_newer_wins() {
         let mut s = State::open(tmp()).unwrap();
-        s.set_desire("filesync", true, vec!["aa".repeat(16)], [9u8; 16])
+        let cat = Catalog::baked();
+        s.set_desire("filesync", true, vec!["aa".repeat(16)], [9u8; 16], &cat)
             .unwrap();
         let mut older = s.desire[0].clone();
         older.enabled = false;
@@ -350,16 +370,17 @@ mod tests {
     fn observe_pending_then_installed() {
         let local = [2u8; 16];
         let mut s = State::open(tmp()).unwrap();
-        s.set_desire("filesync", true, vec![hex16(&local)], local)
+        let cat = Catalog::baked();
+        s.set_desire("filesync", true, vec![hex16(&local)], local, &cat)
             .unwrap();
-        s.observe_local(&dir(local, true, 1, &[]));
+        s.observe_local(&dir(local, true, 1, &[]), &cat);
         let st = s
             .status
             .iter()
             .find(|x| x.catalog_id == "filesync")
             .unwrap();
         assert_eq!(st.state, STATE_PENDING);
-        s.observe_local(&dir(local, true, 1, &["filesync"]));
+        s.observe_local(&dir(local, true, 1, &["filesync"]), &cat);
         let st = s
             .status
             .iter()
@@ -405,7 +426,7 @@ mod tests {
     fn rejects_unknown_catalog() {
         let mut s = State::open(tmp()).unwrap();
         assert_eq!(
-            s.set_desire("malware", true, vec![], [1u8; 16]),
+            s.set_desire("malware", true, vec![], [1u8; 16], &Catalog::baked()),
             Err("unknown_app")
         );
     }

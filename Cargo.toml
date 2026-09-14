@@ -2,7 +2,7 @@
 name = "pnet_installer"
 version = "0.1.0"
 edition = "2021"
-description = "pNet installer agent: catalog, desire, status (notify only)"
+description = "pNet installer agent: GitHub catalog sources, desire, status (notify only)"
 
 [lib]
 name = "pnet_installer"
@@ -17,3 +17,4 @@ ctrlc = { version = "3", features = ["termination"] }
 getrandom = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = "2"

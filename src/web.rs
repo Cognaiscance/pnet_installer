@@ -2,10 +2,10 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use crate::catalog;
+use crate::catalog::Catalog;
 use crate::state::{hex16, State, STATE_INSTALLED, STATE_PENDING};
 use crate::sync::Engine;
 
@@ -13,6 +13,7 @@ pub fn handle(
     mut stream: TcpStream,
     state: &Arc<Mutex<State>>,
     engine: &Arc<Mutex<Engine>>,
+    catalog: &Arc<RwLock<Catalog>>,
 ) -> Result<(), String> {
     stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
     let mut head = Vec::new();
@@ -67,11 +68,14 @@ pub fn handle(
 
     match (method, path) {
         ("GET", "/") | ("GET", "/index.html") => {
-            write_html(&mut stream, &render_home(state, engine))
+            write_html(&mut stream, &render_home(state, engine, catalog))
         }
         ("GET", "/app") => {
             let id = query_param(query, "id").unwrap_or("");
-            write_html(&mut stream, &render_app(state, engine, &url_decode(id)))
+            write_html(
+                &mut stream,
+                &render_app(state, engine, catalog, &url_decode(id)),
+            )
         }
         ("POST", "/enable") => {
             let form = parse_form(&body);
@@ -83,7 +87,7 @@ pub fn handle(
                 .map(|(_, v)| v.clone())
                 .filter(|v| v.len() == 32)
                 .collect();
-            let err = apply_enable(state, engine, &id, enabled, devices);
+            let err = apply_enable(state, engine, catalog, &id, enabled, devices);
             match err {
                 None => write_redirect(&mut stream, &format!("app?id={}", form_enc(&id))),
                 Some("not_writer") => write_status(
@@ -101,12 +105,14 @@ pub fn handle(
 fn apply_enable(
     state: &Arc<Mutex<State>>,
     engine: &Arc<Mutex<Engine>>,
+    catalog: &Arc<RwLock<Catalog>>,
     id: &str,
     enabled: bool,
     devices: Vec<String>,
 ) -> Option<&'static str> {
     let mut st = state.lock().unwrap();
     let mut eng = engine.lock().unwrap();
+    let cat = catalog.read().unwrap_or_else(|e| e.into_inner());
     let dir = eng.dir.clone();
     let writer = match &dir {
         Some(d) => st.is_writer(d),
@@ -119,13 +125,17 @@ fn apply_enable(
         .as_ref()
         .map(|d| d.device_uuid)
         .unwrap_or(st.replica_id);
-    st.set_desire(id, enabled, devices, me).err()?;
+    st.set_desire(id, enabled, devices, me, &cat).err()?;
     eng.desire_dirty = true;
     eng.status_dirty = true;
     None
 }
 
-fn render_home(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>) -> String {
+fn render_home(
+    state: &Arc<Mutex<State>>,
+    engine: &Arc<Mutex<Engine>>,
+    catalog: &Arc<RwLock<Catalog>>,
+) -> String {
     let st = state.lock().unwrap();
     let eng = engine.lock().unwrap();
     let writer = eng
@@ -138,8 +148,9 @@ fn render_home(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>) -> String
     } else {
         "Read-only here. Change enable/devices on the rank-1 SG installer."
     };
+    let cat = catalog.read().unwrap_or_else(|e| e.into_inner());
     let mut cards = String::new();
-    for a in catalog::all() {
+    for a in cat.all() {
         let des = st.desire.iter().find(|d| d.catalog_id == a.id);
         let enabled = des.map(|d| d.enabled).unwrap_or(false);
         let n_dev = des.map(|d| d.device_uuids.len()).unwrap_or(0);
@@ -158,19 +169,24 @@ fn render_home(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>) -> String
             "<div class=\"card\">\
                <h2><a href=\"app?id={id}\">{name}</a> <span class=\"muted\">({flag})</span></h2>\
                <p>{summary}</p>\
-               <p class=\"muted\">{n_dev} device(s) in desire · {installed} installed · {pending} pending</p>\
+               <p class=\"muted\">from {src} · <a href=\"{gh}\">GitHub</a> · \
+               {n_dev} device(s) in desire · {installed} installed · {pending} pending</p>\
              </div>",
-            id = html_escape(a.id),
-            name = html_escape(a.name),
-            summary = html_escape(a.summary),
+            id = html_escape(&a.id),
+            name = html_escape(&a.name),
+            summary = html_escape(&a.summary),
+            src = html_escape(&a.source_file),
+            gh = html_escape(&a.github_url),
         ));
     }
     format!(
         "{head}\
          <h1>Installer</h1>\
-         <p class=\"sub\">Phase 2: desire and status only. \
+         <p class=\"sub\">Apps come from GitHub URL lists in \
+         <code>~/.pnet/installer/app_sources/</code> (managed <code>pnet.list</code> \
+         plus extra files you add). \
          <strong>This agent never downloads or starts packages.</strong> \
-         Copy the run command on each desired device. {role}</p>\
+         Copy the clone command on each desired device. {role}</p>\
          {cards}\
          <p class=\"sub\"><a href=\"/\">← Portal Home</a> (when opened via the portal)</p>\
          </main></body></html>",
@@ -179,8 +195,14 @@ fn render_home(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>) -> String
     )
 }
 
-fn render_app(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>, id: &str) -> String {
-    let Some(a) = catalog::get(id) else {
+fn render_app(
+    state: &Arc<Mutex<State>>,
+    engine: &Arc<Mutex<Engine>>,
+    catalog: &Arc<RwLock<Catalog>>,
+    id: &str,
+) -> String {
+    let cat = catalog.read().unwrap_or_else(|e| e.into_inner());
+    let Some(a) = cat.get(id) else {
         return format!(
             "{PAGE_HEAD}<h1>Unknown app</h1><p><a href=\"./\">Back</a></p></main></body></html>"
         );
@@ -251,7 +273,7 @@ fn render_app(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>, id: &str) 
                <p><button class=\"btn\" type=\"submit\">Save desire</button></p>\
                <p class=\"muted\">Saving does not install. Agents only report pending/installed.</p>\
              </form>",
-            id = html_escape(a.id),
+            id = html_escape(&a.id),
             en = if enabled { "checked" } else { "" },
         )
     } else {
@@ -265,6 +287,7 @@ fn render_app(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>, id: &str) 
          <h1>{name}</h1>\
          <p class=\"sub\">{summary}</p>\
          <p class=\"sub\">Typical placement: {place}</p>\
+         <p class=\"sub\">from {src} · <a href=\"{gh}\">{gh}</a></p>\
          {form}\
          <div class=\"card\">\
            <p><strong>Run on a desired device</strong> (copy; browser does not execute):</p>\
@@ -282,11 +305,13 @@ fn render_app(state: &Arc<Mutex<State>>, engine: &Arc<Mutex<Engine>>, id: &str) 
          <p class=\"sub\"><a href=\"./\">← Catalog</a></p>\
          </main></body></html>",
         head = PAGE_HEAD,
-        name = html_escape(a.name),
-        summary = html_escape(a.summary),
-        place = html_escape(a.placement),
-        cmd = html_escape(a.install_cmd),
-        notes = html_escape(a.notes),
+        name = html_escape(&a.name),
+        summary = html_escape(&a.summary),
+        place = html_escape(&a.placement),
+        src = html_escape(&a.source_file),
+        gh = html_escape(&a.github_url),
+        cmd = html_escape(&a.install_cmd),
+        notes = html_escape(&a.notes),
     )
 }
 
@@ -299,7 +324,7 @@ h1{color:#1a1a2e;margin:0 0 .4rem}h2{font-size:1.1rem;margin:.2rem 0 .5rem}\
 .sub{color:#666;font-size:.9rem;margin:0 0 1rem}\
 .card{background:#fff;border-radius:8px;padding:1rem 1.2rem;\
       box-shadow:0 1px 3px rgba(0,0,0,.08);margin-bottom:1rem}\
-.muted{color:#888;font-size:.85rem}\
+.muted{color:#888;font-size:.85rem}code{font-size:.85rem}\
 a{color:#1a1a2e}.btn{background:#1a1a2e;color:#fff;border:none;border-radius:5px;\
 padding:.4rem .9rem;cursor:pointer;font-size:.9rem}\
 .cmd{background:#1a1a2e;color:#e8e8f0;padding:.9rem 1rem;border-radius:6px;\

@@ -107,6 +107,8 @@ mod tests {
             device_uuids: vec!["ab".repeat(16)],
             updated_at: 10,
             updated_by: "cd".repeat(16),
+            github_url: String::new(),
+            fabric_alias: String::new(),
         }];
         let p = desire_packet(&d).unwrap();
         assert!(encode(&p).len() < MAX_PAYLOAD);

@@ -1,8 +1,13 @@
-# pNet Installer (phases 2–3)
+# pNet Installer (phases 2–3b)
 
 Installer **agent** as a pNet app: catalog, **desired** apps/devices, and
 **status**. Catalog apps are still **notify only** (no signed package exec —
 phase 4).
+
+**Catalog sources:** `~/.pnet/installer/app_sources/` (or `$PNET_INSTALLER_STATE/app_sources/`).
+Each file is a list of GitHub repo URLs. `pnet.list` is managed (official apps).
+Drop another file (e.g. `acme.list`) to add org apps. Store cards come from
+`pnet-app.json` in the repo, else the GitHub description, else a cache/fallback.
 
 **Phase 3:** `pnet_installer bootstrap` installs **pNet + this agent** from a
 **local** binary directory (unpacked dist, or `target/debug` after `cargo build`).
@@ -13,7 +18,8 @@ pNet stays a dumb pipe. Desire and status are installer↔installer app payloads
 ## What the agent does
 
 1. Registers as fabric alias `installer` and portal slug `/apps/installer/`.
-2. Shows the verified catalog (same apps as portal `/store`, plus itself).
+2. Shows the catalog from `app_sources/` GitHub URL lists (official `pnet.list`
+   plus extra files). Portal `/store` redirects here when this agent is mounted.
 3. On the **rank-1 SG** (lowest `sg_rank` among own-user SGs): you enable an app
    and pick devices. That **desire** syncs to other installer agents.
 4. Each agent looks at local `get_data`: if the target alias is registered and
@@ -53,10 +59,12 @@ Sign in → Home → **Installer** (or **Store** until the agent is up).
 | `PNET_PORTAL` | `http://127.0.0.1:8777` |
 | `PNET_ADDR` | `127.0.0.1:7777` |
 | `PNET_SKIP_FABRIC=1` | UI only, no directory sync |
+| `PNET_INSTALLER_NO_NETWORK=1` | Do not fetch GitHub; cache + baked cards only |
 
 ## Non-goals (this phase)
 
 - Signed package fetch / exec of catalog apps (phase 4)
+- Scraping GitHub Pages HTML (cards use `pnet-app.json` / repo API)
 - systemd units (start.sh is enough)
 - Contact-shared or public catalogs
 - Auto-approve of target apps
