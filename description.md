@@ -19,7 +19,7 @@ pNet stays a dumb pipe. Desire and status are installer↔installer app payloads
 
 1. Registers as fabric alias `installer` and portal slug `/apps/installer/`.
 2. Shows the catalog from `app_sources/` GitHub URL lists (official `pnet.list`
-   plus extra files). Portal `/store` redirects here when this agent is mounted.
+   plus extra files) at `/apps/installer/`. Core has no `/store` fallback.
 3. On the **rank-1 SG** (lowest `sg_rank` among own-user SGs): you enable an app
    and pick devices. That **desire** syncs to other installer agents.
 4. Each agent looks at local `get_data`: if the target alias is registered and
@@ -49,7 +49,7 @@ PNET_AUTO_APPROVE_APPS=1 cargo run --manifest-path ../pNet/Cargo.toml
 cargo run
 ```
 
-Sign in → Home → **Installer** (or **Store** until the agent is up).
+Sign in → Home → **Installer** (`/apps/installer/`, once this agent is mounted).
 
 | Variable | Default |
 |----------|---------|
