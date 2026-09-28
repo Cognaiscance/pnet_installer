@@ -7,6 +7,7 @@ pub mod catalog;
 pub mod fabric;
 pub mod fetch;
 pub mod proto;
+pub mod setup;
 pub mod sources;
 pub mod state;
 pub mod sync;

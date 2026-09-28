@@ -34,13 +34,21 @@ Solo node (no SG in the directory) may write desire locally.
 # After cargo build -p pnet -p pnet_installer, both bins sit in target/debug:
 cargo build --manifest-path ../pNet/Cargo.toml --bin pnet
 cargo build
-./target/debug/pnet_installer bootstrap --prefix ~/.pnet --no-start
-# or omit --no-start to launch pnet + agent
-# Create/join: http://127.0.0.1:8777/setup
+./target/debug/pnet_installer bootstrap --prefix ~/.pnet
 ```
 
+On a terminal, bootstrap asks what this machine is before it starts `pnet`:
+
+- **Device grade:** device name and a connection code (an invitation from an SG). The node does not serve a website.
+- **Server grade, new user:** your alias, device name, rank, reachable addresses, and the portal password.
+- **Server grade, join:** device name, connection code, rank, reachable addresses, and the portal password.
+
+The answers are written to `~/.pnet/node.env` (mode 0600) and exported by `start.sh`. Pass the same values as flags to skip the dialog (`--grade`, `--device-alias`, `--connection-code`, `--user-alias`, `--sg-rank`, `--hosts`, `--admin-password`). `--no-setup` copies binaries without configuring a node.
+
+After an SG install, sign in at `http://127.0.0.1:8777/`. A DG has no such URL; use an SG's portal.
+
 `--from DIR` if the binaries are not next to `pnet_installer`. Default prefix
-`~/.pnet` (`bin/`, `start.sh`, `logs/`). User-consented: you ran `bootstrap`.
+`~/.pnet` (`bin/`, `start.sh`, `node.env`, `logs/`). User-consented: you ran `bootstrap`.
 
 ## Run (agent only)
 
@@ -49,7 +57,7 @@ PNET_AUTO_APPROVE_APPS=1 cargo run --manifest-path ../pNet/Cargo.toml
 cargo run
 ```
 
-Sign in → Home → **Installer** (`/apps/installer/`, once this agent is mounted).
+On an SG, sign in → Home → **Installer** (`/apps/installer/`, once this agent is mounted). On a DG the agent still syncs desire and status, and it does not bind its own website.
 
 | Variable | Default |
 |----------|---------|
@@ -69,4 +77,8 @@ Sign in → Home → **Installer** (`/apps/installer/`, once this agent is mount
 - Contact-shared or public catalogs
 - Auto-approve of target apps
 
-See `descriptions/app-store-installer.md`.
+See `descriptions/app-store-installer.md` in the pNet repo.
+
+Windows install and launch of pNet + this agent is specified in
+[descriptions/windows-bootstrap.md](descriptions/windows-bootstrap.md)
+(not implemented).

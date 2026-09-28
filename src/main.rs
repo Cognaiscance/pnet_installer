@@ -20,6 +20,21 @@ use pnet_installer::state::State;
 use pnet_installer::sync::Engine;
 use pnet_installer::web;
 
+/// `PNET_GRADE` wins. Otherwise the one-line file pNet writes at `~/.pnet/grade`.
+fn declared_grade() -> Option<String> {
+    if let Ok(g) = std::env::var("PNET_GRADE") {
+        let g = g.trim().to_string();
+        if !g.is_empty() {
+            return Some(g);
+        }
+    }
+    let path = home_dir().join(".pnet").join("grade");
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
@@ -40,6 +55,10 @@ fn main() {
         Ok(Cmd::Bootstrap(mut opts)) => {
             let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pnet_installer"));
             if let Err(e) = bootstrap::resolve_from(&mut opts, &exe) {
+                eprintln!("[bootstrap] {e}");
+                std::process::exit(1);
+            }
+            if let Err(e) = bootstrap::prepare_setup(&mut opts) {
                 eprintln!("[bootstrap] {e}");
                 std::process::exit(1);
             }
@@ -127,7 +146,8 @@ fn run_agent() {
     let engine = Arc::new(Mutex::new(Engine::new(token)));
 
     let portal_ok = Arc::new(AtomicBool::new(false));
-    {
+    let serve_website = pnet_installer::setup::agent_serves_website(declared_grade().as_deref());
+    if serve_website {
         let portal = portal.clone();
         let slug = slug.clone();
         let title = title.clone();
@@ -244,6 +264,17 @@ fn run_agent() {
                 thread::sleep(Duration::from_millis(500));
             }
         });
+    }
+
+    if !serve_website {
+        println!(
+            "[installer] device-grade node: not hosting a website. The catalog UI is on a server-grade portal."
+        );
+        while !stop.load(Ordering::Acquire) {
+            thread::sleep(Duration::from_millis(200));
+        }
+        println!("[installer] shutdown");
+        return;
     }
 
     let listener = TcpListener::bind(("127.0.0.1", web_port))
