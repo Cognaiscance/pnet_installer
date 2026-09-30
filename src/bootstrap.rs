@@ -137,6 +137,19 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
                         opts.setup.admin_password =
                             it.next().ok_or("--admin-password needs a password")?.clone();
                     }
+                    "--key-passphrase" => {
+                        let passphrase = it
+                            .next()
+                            .ok_or("--key-passphrase needs a passphrase")?
+                            .clone();
+                        if passphrase.len() < setup::MIN_KEY_PASSPHRASE {
+                            return Err(format!(
+                                "--key-passphrase must be at least {} characters",
+                                setup::MIN_KEY_PASSPHRASE
+                            ));
+                        }
+                        opts.setup.key_passphrase = passphrase;
+                    }
                     "--help" | "-h" => return Ok(Cmd::Help),
                     other => return Err(format!("unknown bootstrap flag: {other}")),
                 }
@@ -175,9 +188,12 @@ pub fn help_text() -> &'static str {
        --sg-rank N              Server grade (default 1)\n\
        --hosts LIST             Server grade reachable addresses (PNET_HOSTS)\n\
        --admin-password PASS    Server-grade portal password (at least 8 characters)\n\
+       --key-passphrase PASS    Seals private keys (at least 8 characters; both grades)\n\
      \n\
      A device-grade node does not serve the website. The portal (default port\n\
      8777) is started only for server grade, after these parameters are applied.\n\
+     pNet creates keys only when PNET_KEY_PASSPHRASE is set, so the key\n\
+     passphrase is written into node.env for every grade.\n\
      \n\
      Catalog: GitHub URL lists in $PREFIX/installer/app_sources/ (managed pnet.list).\n\
      Does not download or exec catalog apps (signed install is phase 4).\n"
@@ -484,6 +500,8 @@ mod tests {
             "laptop".into(),
             "--connection-code".into(),
             "INV".into(),
+            "--key-passphrase".into(),
+            "secret12".into(),
             "--no-setup".into(),
         ])
         .unwrap()
@@ -492,11 +510,20 @@ mod tests {
                 assert_eq!(o.setup.grade, "dg");
                 assert_eq!(o.setup.device_alias, "laptop");
                 assert_eq!(o.setup.connection_code, "INV");
+                assert_eq!(o.setup.key_passphrase, "secret12");
                 assert!(o.setup.is_complete());
                 assert!(o.no_setup);
             }
             _ => panic!("expected bootstrap"),
         }
+        assert!(parse_args(&[
+            "pnet_installer".into(),
+            "bootstrap".into(),
+            "--key-passphrase".into(),
+            "short".into(),
+        ])
+        .unwrap_err()
+        .contains("at least 8"));
         assert!(parse_args(&[
             "pnet_installer".into(),
             "bootstrap".into(),
@@ -568,6 +595,7 @@ mod tests {
         o.setup.grade = "dg".into();
         o.setup.device_alias = "laptop".into();
         o.setup.connection_code = "INVITE".into();
+        o.setup.key_passphrase = "secret12".into();
         let p = plan(&o).unwrap();
         let log = execute(&o, &p).unwrap();
         assert!(log.contains("does not serve a website"));
@@ -575,6 +603,7 @@ mod tests {
         assert!(env.contains("PNET_GRADE='dg'"));
         assert!(env.contains("PNET_INVITATION_CODE='INVITE'"));
         assert!(env.contains("PNET_DEVICE_ALIAS='laptop'"));
+        assert!(env.contains("PNET_KEY_PASSPHRASE='secret12'"));
         let sh = fs::read_to_string(prefix.join("start.sh")).unwrap();
         assert!(sh.contains("does not serve a website"));
         assert!(!sh.contains("/setup"));

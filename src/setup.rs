@@ -2,13 +2,17 @@
 //!
 //! A device-grade node needs a connection code. A server-grade node needs an
 //! identity (new user, or a connection code to join) plus reachable addresses
-//! and the portal password. When those values are already on the bootstrap
-//! command line, nothing is asked. Otherwise a terminal dialog fills them in.
+//! and the portal password. Both grades need a key passphrase: pNet will not
+//! create keys unless `PNET_KEY_PASSPHRASE` is already set. When those values
+//! are already on the bootstrap command line, nothing is asked. Otherwise a
+//! terminal dialog fills them in.
 
 use std::io::{BufRead, Write};
 use std::process::Command;
 
 pub const MIN_ADMIN_PASSWORD: usize = 8;
+/// Matches `pnet::keystore::MIN_PASSPHRASE_LEN`. This crate does not depend on pNet.
+pub const MIN_KEY_PASSPHRASE: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct NodeSetup {
@@ -25,6 +29,8 @@ pub struct NodeSetup {
     pub hosts: String,
     /// Portal password. Required for server grade. Unused on device grade.
     pub admin_password: String,
+    /// Seals private keys (`PNET_KEY_PASSPHRASE`). Required for both grades.
+    pub key_passphrase: String,
 }
 
 impl NodeSetup {
@@ -42,11 +48,18 @@ impl NodeSetup {
         if self.device_alias.trim().is_empty() {
             return false;
         }
+        if !self.key_passphrase_ok() {
+            return false;
+        }
         match self.grade_normalized() {
             Some("dg") => !self.connection_code.trim().is_empty(),
             Some("sg") => self.sg_identity_ok() && self.sg_rank_ok() && self.sg_hosts_and_password_ok(),
             _ => false,
         }
+    }
+
+    fn key_passphrase_ok(&self) -> bool {
+        self.key_passphrase.len() >= MIN_KEY_PASSPHRASE
     }
 
     fn sg_identity_ok(&self) -> bool {
@@ -75,6 +88,7 @@ impl NodeSetup {
                 lines.push(env_line("PNET_GRADE", "dg"));
                 lines.push(env_line("PNET_DEVICE_ALIAS", self.device_alias.trim()));
                 lines.push(env_line("PNET_INVITATION_CODE", self.connection_code.trim()));
+                lines.push(env_line("PNET_KEY_PASSPHRASE", &self.key_passphrase));
             }
             Some("sg") => {
                 let rank = {
@@ -91,6 +105,7 @@ impl NodeSetup {
                 lines.push(env_line("PNET_SG_RANK", rank));
                 lines.push(env_line("PNET_HOSTS", self.hosts.trim()));
                 lines.push(env_line("PNET_ADMIN_PASSWORD", &self.admin_password));
+                lines.push(env_line("PNET_KEY_PASSPHRASE", &self.key_passphrase));
             }
             _ => {}
         }
@@ -125,17 +140,20 @@ pub fn missing_params_message() -> String {
      Pass them on the command line, or run bootstrap in a terminal for the dialog.\n\
      \n\
      Device grade:\n\
-       --grade dg --device-alias NAME --connection-code CODE\n\
+       --grade dg --device-alias NAME --connection-code CODE \\\n\
+         --key-passphrase PASS\n\
      \n\
      New server grade:\n\
        --grade sg --user-alias NAME --device-alias NAME --hosts HOSTS \\\n\
-         --admin-password PASS [--sg-rank N]\n\
+         --admin-password PASS --key-passphrase PASS [--sg-rank N]\n\
      \n\
      Join an existing user as server grade:\n\
        --grade sg --device-alias NAME --connection-code CODE --hosts HOSTS \\\n\
-         --admin-password PASS [--sg-rank N]\n\
+         --admin-password PASS --key-passphrase PASS [--sg-rank N]\n\
      \n\
-     --no-setup installs the binaries without configuring a node.\n"
+     The key passphrase seals private keys (at least 8 characters). It is not\n\
+     the portal password. --no-setup installs the binaries without configuring\n\
+     a node.\n"
         .to_string()
 }
 
@@ -177,6 +195,7 @@ pub fn prompt<R: BufRead, W: Write>(
     if setup.grade_normalized() == Some("dg") {
         fill_line(input, out, &mut setup.device_alias, "Device name: ")?;
         fill_line(input, out, &mut setup.connection_code, "Connection code: ")?;
+        fill_key_passphrase(input, out, setup, hide_secrets)?;
         return Ok(());
     }
 
@@ -234,6 +253,38 @@ pub fn prompt<R: BufRead, W: Write>(
             setup.admin_password = password;
             break;
         }
+    }
+    fill_key_passphrase(input, out, setup, hide_secrets)?;
+    Ok(())
+}
+
+fn fill_key_passphrase<R: BufRead, W: Write>(
+    input: &mut R,
+    out: &mut W,
+    setup: &mut NodeSetup,
+    hide_secrets: bool,
+) -> Result<(), String> {
+    if setup.key_passphrase.len() >= MIN_KEY_PASSPHRASE {
+        return Ok(());
+    }
+    loop {
+        writeln!(
+            out,
+            "Key passphrase (at least {MIN_KEY_PASSPHRASE} characters). This seals private keys. It is not the portal password."
+        )
+        .map_err(|e| e.to_string())?;
+        let passphrase = ask_secret(input, out, "Key passphrase: ", hide_secrets)?;
+        let confirm = ask_secret(input, out, "Confirm key passphrase: ", hide_secrets)?;
+        if passphrase.len() < MIN_KEY_PASSPHRASE {
+            writeln!(out, "Key passphrase is too short.").map_err(|e| e.to_string())?;
+            continue;
+        }
+        if passphrase != confirm {
+            writeln!(out, "Key passphrases do not match.").map_err(|e| e.to_string())?;
+            continue;
+        }
+        setup.key_passphrase = passphrase;
+        break;
     }
     Ok(())
 }
@@ -294,10 +345,14 @@ mod tests {
             grade: "dg".into(),
             device_alias: "laptop".into(),
             connection_code: "abc".into(),
+            key_passphrase: "secret12".into(),
             ..NodeSetup::default()
         };
         assert!(s.is_complete());
         s.connection_code.clear();
+        assert!(!s.is_complete());
+        s.connection_code = "abc".into();
+        s.key_passphrase = "short".into();
         assert!(!s.is_complete());
     }
 
@@ -310,6 +365,7 @@ mod tests {
             sg_rank: String::new(),
             hosts: "pnet.example:7777".into(),
             admin_password: "password1".into(),
+            key_passphrase: "secret12".into(),
             ..NodeSetup::default()
         };
         assert!(new_user.is_complete());
@@ -317,6 +373,7 @@ mod tests {
         assert!(env.contains("PNET_GRADE='sg'\n"));
         assert!(env.contains("PNET_USER_ALIAS='alice'\n"));
         assert!(env.contains("PNET_SG_RANK='1'\n"));
+        assert!(env.contains("PNET_KEY_PASSPHRASE='secret12'\n"));
         assert!(!env.contains("PNET_INVITATION_CODE"));
 
         let join = NodeSetup {
@@ -326,25 +383,30 @@ mod tests {
             sg_rank: "2".into(),
             hosts: "a,b".into(),
             admin_password: "it's long".into(),
+            key_passphrase: "key's long".into(),
             ..NodeSetup::default()
         };
         assert!(join.is_complete());
         let env = join.to_env();
         assert!(env.contains("PNET_INVITATION_CODE='code+/=x'\n"));
         assert!(env.contains("PNET_ADMIN_PASSWORD='it'\\''s long'\n"));
+        assert!(env.contains("PNET_KEY_PASSPHRASE='key'\\''s long'\n"));
         assert!(!env.contains("PNET_USER_ALIAS"));
     }
 
     #[test]
     fn dialog_collects_dg_connection_code() {
         let mut setup = NodeSetup::default();
-        let mut input = Cursor::new("2\nlaptop\nINVITECODE\n");
+        let mut input = Cursor::new("2\nlaptop\nINVITECODE\nshort\nshort\nsecret12\nsecret12\n");
         let mut out = Vec::new();
         prompt(&mut setup, &mut input, &mut out, false).unwrap();
         assert_eq!(setup.grade, "dg");
         assert_eq!(setup.device_alias, "laptop");
         assert_eq!(setup.connection_code, "INVITECODE");
+        assert_eq!(setup.key_passphrase, "secret12");
         assert!(setup.is_complete());
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Key passphrase is too short."));
     }
 
     #[test]
@@ -354,7 +416,7 @@ mod tests {
             ..NodeSetup::default()
         };
         let mut input = Cursor::new(
-            "1\nHome Server\nAlice\n\nsg.example\nshort\nshort\npassword1\npassword1\n",
+            "1\nHome Server\nAlice\n\nsg.example\nshort\nshort\npassword1\npassword1\nsecret12\nsecret12\n",
         );
         let mut out = Vec::new();
         prompt(&mut setup, &mut input, &mut out, false).unwrap();
@@ -363,6 +425,7 @@ mod tests {
         assert_eq!(setup.sg_rank, "1");
         assert_eq!(setup.hosts, "sg.example");
         assert_eq!(setup.admin_password, "password1");
+        assert_eq!(setup.key_passphrase, "secret12");
         assert!(setup.is_complete());
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("too short"));
