@@ -1,14 +1,7 @@
-//! Installer agent: catalog + desired apps + status. Notify only for catalog apps.
-//! `bootstrap` installs pNet + this agent from a local binary directory.
+//! Bootstrap pNet onto this machine from a local `pnet` binary.
+//!
+//! This crate is not a pNet app. It does not register with the fabric, mount
+//! a portal page, or install other programs.
 
 pub mod bootstrap;
-pub mod card;
-pub mod catalog;
-pub mod fabric;
-pub mod fetch;
-pub mod proto;
 pub mod setup;
-pub mod sources;
-pub mod state;
-pub mod sync;
-pub mod web;

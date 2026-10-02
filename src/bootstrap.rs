@@ -1,9 +1,9 @@
-//! Phase 3: empty-machine bootstrap — install pNet + this agent from a local
-//! binary directory, then optionally start them.
+//! Empty-machine bootstrap — install `pnet` from a local binary directory,
+//! then optionally start it.
 //!
-//! Does **not** fetch packages from the network (phase 4). The user points at
-//! a folder that already contains `pnet` and `pnet_installer` (unpacked dist,
-//! or `target/debug` after `cargo build`).
+//! Does not fetch packages and does not install any other program. The user
+//! points at a folder that already contains `pnet` (unpacked dist, or
+//! `target/debug` after `cargo build`).
 
 use std::fs;
 use std::io::IsTerminal;
@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::setup::{self, NodeSetup};
 
-const BINS: &[&str] = &["pnet", "pnet_installer"];
+const BINS: &[&str] = &["pnet"];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Opts {
@@ -45,7 +45,6 @@ pub struct Plan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cmd {
-    Run,
     Bootstrap(Opts),
     Help,
 }
@@ -63,7 +62,7 @@ fn home_dir() -> PathBuf {
 /// If `pnet` sits next to this binary, that directory is a valid `--from`.
 pub fn infer_from(current_exe: &Path) -> Option<PathBuf> {
     let dir = current_exe.parent()?;
-    if dir.join("pnet").is_file() && dir.join("pnet_installer").is_file() {
+    if dir.join("pnet").is_file() {
         Some(dir.to_path_buf())
     } else {
         None
@@ -73,10 +72,15 @@ pub fn infer_from(current_exe: &Path) -> Option<PathBuf> {
 pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
     let mut it = args.iter().skip(1);
     let Some(first) = it.next() else {
-        return Ok(Cmd::Run);
+        return Ok(Cmd::Help);
     };
     match first.as_str() {
-        "run" | "--run" => Ok(Cmd::Run),
+        "run" | "--run" => {
+            return Err(
+                "pnet_installer only bootstraps pNet. It does not run as an app. Try: bootstrap"
+                    .into(),
+            );
+        }
         "help" | "--help" | "-h" => Ok(Cmd::Help),
         "bootstrap" => {
             let mut opts = Opts {
@@ -157,28 +161,30 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
             Ok(Cmd::Bootstrap(opts))
         }
         other => Err(format!(
-            "unknown command {other:?} (try: run | bootstrap | help)"
+            "unknown command {other:?} (try: bootstrap | help)"
         )),
     }
 }
 
 pub fn help_text() -> &'static str {
-    "pnet_installer — agent (run) or empty-machine bootstrap\n\
+    "pnet_installer — bootstrap pNet onto this machine\n\
      \n\
      Commands:\n\
-       run                  Long-running agent (default)\n\
-       bootstrap            Install pNet + agent from local binaries, then start\n\
+       bootstrap            Copy a local pnet binary, write node.env and start.sh, then start\n\
        help                 This text\n\
      \n\
+     With no command, this help is printed. pnet_installer does not register\n\
+     as a pNet app and does not install other programs.\n\
+     \n\
      bootstrap flags:\n\
-       --from DIR           Directory containing pnet and pnet_installer\n\
-                            (default: directory of this executable, if both exist)\n\
+       --from DIR           Directory containing the pnet binary\n\
+                            (default: directory of this executable, if pnet is there)\n\
        --prefix DIR         Install prefix (default: ~/.pnet)\n\
-       --force              Overwrite existing binaries\n\
+       --force              Overwrite an existing pnet binary\n\
        --no-start           Copy and write start.sh only\n\
-       --dry-run            Print plan, write nothing\n\
+       --dry-run            Print the plan, write nothing\n\
        --http-bind ADDR     PNET_HTTP_BIND for a server-grade portal (default 127.0.0.1)\n\
-       --no-setup           Install binaries without configuring the node\n\
+       --no-setup           Install pnet without configuring the node\n\
      \n\
      Node parameters (if omitted on a terminal, a dialog asks for them):\n\
        --grade sg|dg\n\
@@ -195,15 +201,15 @@ pub fn help_text() -> &'static str {
      pNet creates keys only when PNET_KEY_PASSPHRASE is set, so the key\n\
      passphrase is written into node.env for every grade.\n\
      \n\
-     Catalog: GitHub URL lists in $PREFIX/installer/app_sources/ (managed pnet.list).\n\
-     Does not download or exec catalog apps (signed install is phase 4).\n"
+     Start each app on the device where it should run, then approve it in\n\
+     Config on that node.\n"
 }
 
 pub fn resolve_from(opts: &mut Opts, current_exe: &Path) -> Result<(), String> {
     if opts.from.as_os_str().is_empty() {
         opts.from = infer_from(current_exe).ok_or_else(|| {
             "no --from DIR and pnet is not next to this binary\n\
-             Unpack a dist folder (pnet + pnet_installer) and pass --from, or run from target/debug after cargo build."
+             Unpack a dist folder that contains pnet and pass --from, or point --from at target/debug after cargo build."
                 .to_string()
         })?;
     }
@@ -285,9 +291,6 @@ pub fn execute(opts: &Opts, plan: &Plan) -> Result<String, String> {
     fs::create_dir_all(opts.prefix.join("bin")).map_err(|e| e.to_string())?;
     fs::create_dir_all(opts.prefix.join("logs")).map_err(|e| e.to_string())?;
     fs::create_dir_all(opts.prefix.join("run")).map_err(|e| e.to_string())?;
-    let sources = crate::sources::ensure_app_sources(&opts.prefix.join("installer"))
-        .map_err(|e| format!("app_sources: {e}"))?;
-    log.push_str(&format!("app sources {}\n", sources.display()));
 
     for (src, dest, kind) in &plan.copies {
         match kind {
@@ -354,30 +357,23 @@ fn ready_line(opts: &Opts) -> String {
 }
 
 fn next_steps(opts: &Opts) -> String {
-    let sources = opts.prefix.join("installer");
     if opts.setup.is_complete() {
         if opts.setup.grade_normalized() == Some("dg") {
-            return format!(
-                "Device-grade node does not serve a website. Manage the network from a server-grade portal.\n\
-                 Extra apps: drop a GitHub URL list in {}/app_sources/ (still notify-only).\n",
-                sources.display()
-            );
+            return "Device-grade node does not serve a website. Manage the network from a server-grade portal.\n\
+                 Start each app on this device yourself, then approve it in Config.\n"
+                .into();
         }
         if opts.setup.grade_normalized() == Some("sg") {
             return format!(
                 "Portal: http://{}:8777/ (sign in with the admin password).\n\
-                 Then Home → Installer. Extra apps: drop a GitHub URL list in {}/app_sources/ (still notify-only).\n",
+                 Start each app on the device where it should run, then approve it in Config.\n",
                 opts.http_bind,
-                sources.display()
             );
         }
     }
-    format!(
-        "No node parameters were saved. Pass --grade and the other flags, or run bootstrap in a terminal.\n\
-         A device-grade node will not open a setup website.\n\
-         Extra apps: drop a GitHub URL list in {}/app_sources/ (still notify-only).\n",
-        sources.display()
-    )
+    "No node parameters were saved. Pass --grade and the other flags, or run bootstrap in a terminal.\n\
+     A device-grade node will not open a setup website.\n"
+        .into()
 }
 
 fn start_script(prefix: &Path, http_bind: &str, ready: &str) -> String {
@@ -397,11 +393,6 @@ fn start_script(prefix: &Path, http_bind: &str, ready: &str) -> String {
          if [ ! -f \"$PREFIX/run/pnet.pid\" ] || ! kill -0 \"$(cat \"$PREFIX/run/pnet.pid\")\" 2>/dev/null; then\n\
            \"$PREFIX/bin/pnet\" >>\"$PREFIX/logs/pnet.log\" 2>&1 &\n\
            echo $! >\"$PREFIX/run/pnet.pid\"\n\
-           sleep 1\n\
-         fi\n\
-         if [ ! -f \"$PREFIX/run/installer.pid\" ] || ! kill -0 \"$(cat \"$PREFIX/run/installer.pid\")\" 2>/dev/null; then\n\
-           \"$PREFIX/bin/pnet_installer\" run >>\"$PREFIX/logs/installer.log\" 2>&1 &\n\
-           echo $! >\"$PREFIX/run/installer.pid\"\n\
          fi\n\
          echo '{ready}'\n"
     )
@@ -442,9 +433,7 @@ mod tests {
     fn dummy_from() -> PathBuf {
         let d = tmp();
         fs::write(d.join("pnet"), b"#!/bin/sh\necho pnet\n").unwrap();
-        fs::write(d.join("pnet_installer"), b"#!/bin/sh\necho inst\n").unwrap();
         chmod_755(&d.join("pnet")).unwrap();
-        chmod_755(&d.join("pnet_installer")).unwrap();
         d
     }
 
@@ -462,12 +451,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_run_default_and_bootstrap_flags() {
-        assert_eq!(parse_args(&["pnet_installer".into()]).unwrap(), Cmd::Run);
-        assert_eq!(
-            parse_args(&["pnet_installer".into(), "run".into()]).unwrap(),
-            Cmd::Run
-        );
+    fn parse_help_default_and_bootstrap_flags() {
+        assert_eq!(parse_args(&["pnet_installer".into()]).unwrap(), Cmd::Help);
+        assert!(parse_args(&["pnet_installer".into(), "run".into()])
+            .unwrap_err()
+            .contains("does not run as an app"));
         match parse_args(&[
             "pnet_installer".into(),
             "bootstrap".into(),
@@ -534,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn infer_from_requires_both_bins() {
+    fn infer_from_requires_pnet() {
         let d = dummy_from();
         let exe = d.join("pnet_installer");
         assert_eq!(infer_from(&exe), Some(d.clone()));
@@ -545,10 +533,9 @@ mod tests {
     #[test]
     fn plan_errors_on_missing_bin() {
         let d = tmp();
-        fs::write(d.join("pnet"), b"x").unwrap();
         let mut o = opts(tmp(), d);
         o.dry_run = true;
-        assert!(plan(&o).unwrap_err().contains("missing pnet_installer"));
+        assert!(plan(&o).unwrap_err().contains("missing pnet"));
     }
 
     #[test]
@@ -561,15 +548,16 @@ mod tests {
         assert!(log.contains("not starting"));
         assert!(log.contains("will not open a setup website"));
         assert!(prefix.join("bin/pnet").is_file());
-        assert!(prefix.join("bin/pnet_installer").is_file());
+        assert!(!prefix.join("bin/pnet_installer").exists());
         assert!(!prefix.join("node.env").exists());
         let sh = fs::read_to_string(prefix.join("start.sh")).unwrap();
         assert!(sh.contains("PNET_HTTP_BIND=127.0.0.1"));
         assert!(sh.contains("node.env"));
-        assert!(sh.contains("pnet_installer\" run"));
+        assert!(sh.contains("bin/pnet"));
+        assert!(!sh.contains("pnet_installer"));
         assert!(!sh.contains("/setup"));
         assert!(prefix.join("bootstrap.json").is_file());
-        assert!(prefix.join("installer/app_sources/pnet.list").is_file());
+        assert!(!prefix.join("installer").exists());
         // second run without --force keeps existing
         let p2 = plan(&o).unwrap();
         assert!(p2.copies.iter().all(|c| c.2 == CopyKind::SkipExists));
