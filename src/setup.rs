@@ -152,16 +152,8 @@ pub fn missing_params_message() -> String {
          --admin-password PASS --key-passphrase PASS [--sg-rank N]\n\
      \n\
      The key passphrase seals private keys (at least 8 characters). It is not\n\
-     the portal password. --no-setup installs the binaries without configuring\n\
-     a node.\n"
+     the portal password. --no-setup installs pnet without configuring a node.\n"
         .to_string()
-}
-
-/// The installer agent's own listener is a website. Skip it on device grade.
-pub fn agent_serves_website(grade: Option<&str>) -> bool {
-    !grade
-        .map(|g| g.trim().eq_ignore_ascii_case("dg"))
-        .unwrap_or(false)
 }
 
 /// Fill any missing fields from the terminal. Flags already set are kept.
@@ -431,11 +423,4 @@ mod tests {
         assert!(text.contains("too short"));
     }
 
-    #[test]
-    fn website_is_not_served_for_device_grade() {
-        assert!(!agent_serves_website(Some("dg")));
-        assert!(!agent_serves_website(Some(" DG ")));
-        assert!(agent_serves_website(Some("sg")));
-        assert!(agent_serves_website(None));
-    }
 }
