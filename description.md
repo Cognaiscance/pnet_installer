@@ -39,11 +39,13 @@ cargo build
 
 On a terminal, bootstrap asks what this machine is before it starts `pnet`:
 
-- **Device grade:** device name and a connection code (an invitation from an SG). The node does not serve a website.
-- **Server grade, new user:** your alias, device name, rank, reachable addresses, and the portal password.
-- **Server grade, join:** device name, connection code, rank, reachable addresses, and the portal password.
+- **Device grade:** device name, a connection code (an invitation from an SG), and a key passphrase. The node does not serve a website.
+- **Server grade, new user:** your alias, device name, rank, reachable addresses, the portal password, and a key passphrase.
+- **Server grade, join:** device name, connection code, rank, reachable addresses, the portal password, and a key passphrase.
 
-The answers are written to `~/.pnet/node.env` (mode 0600) and exported by `start.sh`. Pass the same values as flags to skip the dialog (`--grade`, `--device-alias`, `--connection-code`, `--user-alias`, `--sg-rank`, `--hosts`, `--admin-password`). `--no-setup` copies binaries without configuring a node.
+The key passphrase is not the portal password. pNet creates and seals private keys only when `PNET_KEY_PASSPHRASE` is already set (at least 8 characters). Bootstrap writes that variable into `node.env` for every grade. Without it, a new server stays on the setup page and logs `new-user setup failed: passphrase`.
+
+The answers are written to `~/.pnet/node.env` (mode 0600) and exported by `start.sh`. Pass the same values as flags to skip the dialog (`--grade`, `--device-alias`, `--connection-code`, `--user-alias`, `--sg-rank`, `--hosts`, `--admin-password`, `--key-passphrase`). `--no-setup` copies binaries without configuring a node.
 
 After an SG install, sign in at `http://127.0.0.1:8777/`. A DG has no such URL; use an SG's portal.
 

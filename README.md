@@ -6,7 +6,7 @@ local binaries). See [description.md](description.md).
 ```bash
 # Empty machine (binaries in the same folder as this program).
 # A terminal dialog asks for a connection code (DG) or SG identity,
-# unless those flags are already on the command line.
+# plus the key passphrase, unless those flags are already on the command line.
 ./pnet_installer bootstrap
 
 # Agent only, pNet already running:
