@@ -1,10 +1,17 @@
 # Forward upgrade
 
-**Status:** local `--from` upgrade is what `bootstrap` does. See
-[description.md](../description.md). Downloading a published release (work
-step 5) is not implemented. `pnet --version` and `format_version` are changes
-in the pNet repo. A binary that does not print `pnet X.Y.Z` is treated as
-having no version.
+**Status:** stopped after step 4. Local `--from` upgrade is what `bootstrap`
+does. See [description.md](../description.md). Downloading a published
+release (step 5) is not implemented. A binary that does not print
+`pnet X.Y.Z` is treated as having no version.
+
+| Step | Where | State |
+|------|--------|--------|
+| 1. `pnet --version` | pNet `develop` | Done. |
+| 2. `format_version`, fail closed | pNet `develop` | Done. |
+| 3. Local forward upgrade | this repo `develop` | Done. |
+| 4. Release assets | pNet `develop` | Done as a workflow and script. No `vX.Y.Z` tag has been pushed, so no GitHub Release exists yet. See `pNet/descriptions/release-assets.md`. |
+| 5. Installer fetches the index | this repo | Not started. |
 
 **Goal:** running the installer is the install and the upgrade.
 
@@ -170,10 +177,12 @@ speaks to on UDP 7777. The installer does not read that note.
 
 ### 4. Published binaries, when the installer should fetch "latest"
 
-Not required for the local `--from` upgrade. Required before phase E.
+Not required for the local `--from` upgrade. Required before step 5.
 
-There is none of this today. `pNet/Cargo.toml` is `0.1.0`, the repo has no
-release tags, and it has no `.github` workflow.
+The workflow and `scripts/release-assets.sh` are on pNet `develop`
+(`descriptions/release-assets.md`). `Cargo.toml` is still `0.1.0`. No release
+tag has been pushed, so the installer still has nothing to download. Pushing
+`v0.1.0` is what publishes the archives. `develop` is not a version.
 
 One archive per version per target, plus a checksum. A target is operating
 system + CPU + C library. A release binary dynamically links glibc and
@@ -208,6 +217,8 @@ runs.
 
 ### 1. pNet: `pnet --version`
 
+**Done.** On pNet `develop`.
+
 Repo: `pNet`. Branch from `develop`.
 
 - In `src/main.rs`, handle `--version` and `-V` before any data-dir work.
@@ -216,6 +227,8 @@ Repo: `pNet`. Branch from `develop`.
 - No installer change in this step.
 
 ### 2. pNet: format version, fail closed
+
+**Done.** On pNet `develop`.
 
 Repo: `pNet`. After step 1, or in parallel on its own branch from `develop`.
 
@@ -231,9 +244,11 @@ Repo: `pNet`. After step 1, or in parallel on its own branch from `develop`.
 
 ### 3. Installer: local forward upgrade
 
+**Done.** On this repo's `develop`.
+
 Repo: `pnet_installer`. Depends on the `--version` contract from step 1.
-Implemented: `bootstrap` follows the decision table, stops a live pid before
-a replace, and writes `node.env` only when that file is missing.
+`bootstrap` follows the decision table, stops a live pid before a replace,
+and writes `node.env` only when that file is missing.
 
 In `src/bootstrap.rs`:
 
@@ -254,6 +269,9 @@ In `src/bootstrap.rs`:
 
 ### 4. pNet: release assets
 
+**Done** as the workflow and script on pNet `develop`. The first tag has not
+been pushed.
+
 Repo: `pNet`. When a version should be installable on a machine that does
 not have a local build.
 
@@ -267,6 +285,10 @@ Hand builds on known machines can still produce those archives. The names
 and hashes are what the installer checks.
 
 ### 5. Installer: fetch the latest binary
+
+**Not started.** This is the next change. It needs a published release
+before a machine can actually download `pnet`. The index layout to fetch is
+`pNet/descriptions/release-assets.md`.
 
 Repo: `pnet_installer`. Depends on step 4.
 
