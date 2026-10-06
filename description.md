@@ -49,3 +49,8 @@ Default prefix `~/.pnet` (`bin/pnet`, `start.sh`, `node.env`, `logs/`). You ran 
 - Installing or starting any program other than `pnet`
 - systemd units (`start.sh` is enough)
 - Windows (see [descriptions/windows-bootstrap.md](descriptions/windows-bootstrap.md))
+
+A version-manager model (several pNet versions side by side, installed like
+nvm) is proposed in
+[descriptions/version-manager.md](descriptions/version-manager.md) and is not
+implemented.

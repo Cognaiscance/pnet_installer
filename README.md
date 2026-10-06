@@ -21,3 +21,7 @@ device-grade node does not serve a website.
 Windows bootstrap (install and run `pnet`) is planned in
 [descriptions/windows-bootstrap.md](descriptions/windows-bootstrap.md) and is
 not implemented yet.
+
+A version manager (install and switch pNet versions, nvm-style) is proposed in
+[descriptions/version-manager.md](descriptions/version-manager.md) and is not
+implemented yet.
