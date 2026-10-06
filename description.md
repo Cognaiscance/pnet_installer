@@ -39,16 +39,22 @@ Default prefix `~/.pnet` (`bin/pnet`, `start.sh`, `node.env`, `logs/`). You ran 
 | `--from` | Directory containing the `pnet` binary |
 | `--http-bind` | `PNET_HTTP_BIND` for a server-grade portal (default `127.0.0.1`) |
 | `--no-start` | Write files and do not run `start.sh` |
-| `--force` | Overwrite an existing `bin/pnet` with no version check |
-| `--dry-run` | Print the plan and write nothing |
-
-A second `bootstrap` keeps `bin/pnet` unless `--force`. `--force` replaces that file and does not compare versions. Passing setup parameters again rewrites `node.env`.
+| `--force` | Replace `bin/pnet` when the versions are equal, or when a version cannot be read. A newer installed binary is left in place |
+| `--dry-run` | Print install, keep, upgrade, or refuse, and write nothing |
 
 ## Upgrade
 
-One `pnet` binary lives under the prefix. Running the installer on a machine that already has pNet compares the installed binary with the one you brought. A newer binary replaces the older one, then the node is started again. An older binary does not replace a newer one. `node.env` and `~/.pnet/data` stay where they are.
+One `pnet` binary lives under the prefix. `bootstrap` runs `<binary> --version` on the installed copy and on the one you brought.
 
-That behavior is specified in [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md). It is not implemented. The code on `develop` is still the second-run rule in the table above.
+- Nothing installed yet: copy the binary, write `node.env` when that file is missing, write `start.sh`, and start the node.
+- The binary you brought is newer: stop the running node, replace `bin/pnet`, and start it again.
+- The versions match: leave `bin/pnet` and a running node in place. `--force` replaces the file anyway.
+- The installed binary is newer: refuse, leave the node running, and change nothing.
+- A binary that does not print `pnet X.Y.Z` has no version. A versioned binary replaces an unversioned one. An unversioned binary does not replace a versioned one unless `--force` is set.
+
+`node.env` is written only when it is missing. A later run does not prompt and does not apply new setup flags over that file. The installer does not read or write `~/.pnet/data`.
+
+Fetching a published release, when you have no local binary, is specified in [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md) and is not implemented. `--from` (or a `pnet` beside this program) is still required.
 
 ## Non-goals
 

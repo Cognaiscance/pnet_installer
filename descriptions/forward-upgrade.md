@@ -1,10 +1,10 @@
 # Forward upgrade
 
-**Status:** plan. Not implemented. The program on `develop` is still a
-one-shot bootstrap: it copies a local `pnet` into `~/.pnet/bin/pnet`, writes
-`node.env` and `start.sh`, and starts that copy. A second run keeps the
-existing binary unless `--force`, and `--force` overwrites it with no version
-check. See [description.md](../description.md).
+**Status:** local `--from` upgrade is what `bootstrap` does. See
+[description.md](../description.md). Downloading a published release (work
+step 5) is not implemented. `pnet --version` and `format_version` are changes
+in the pNet repo. A binary that does not print `pnet X.Y.Z` is treated as
+having no version.
 
 **Goal:** running the installer is the install and the upgrade.
 
@@ -71,7 +71,8 @@ release needs them.
 candidate. It does not allow a downgrade. It does not rewrite `node.env`.
 
 `--dry-run` prints install, keep, upgrade, or refuse, and writes nothing.
-It does not run the candidate.
+It still runs `<binary> --version` so that word is real, and it does not
+start the node.
 
 `--no-start` on an upgrade still stops the running process before the copy,
 and does not start the new one. Leaving the old process up would keep the
@@ -231,6 +232,8 @@ Repo: `pNet`. After step 1, or in parallel on its own branch from `develop`.
 ### 3. Installer: local forward upgrade
 
 Repo: `pnet_installer`. Depends on the `--version` contract from step 1.
+Implemented: `bootstrap` follows the decision table, stops a live pid before
+a replace, and writes `node.env` only when that file is missing.
 
 In `src/bootstrap.rs`:
 

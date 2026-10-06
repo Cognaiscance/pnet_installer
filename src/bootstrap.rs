@@ -1,16 +1,18 @@
 //! Empty-machine bootstrap — install `pnet` from a local binary directory,
-//! then optionally start it.
+//! or replace it when that binary is newer, then optionally start it.
 //!
 //! Does not fetch packages and does not install any other program. The user
 //! points at a folder that already contains `pnet` (unpacked dist, or
 //! `target/debug` after `cargo build`).
 
+use std::cmp::Ordering;
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::setup::{self, NodeSetup};
 
@@ -29,16 +31,32 @@ pub struct Opts {
     pub setup: NodeSetup,
 }
 
+/// Result of asking a binary for `pnet X.Y.Z`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CopyKind {
-    Copy,
-    SkipExists,
-    Overwrite,
+pub enum VersionProbe {
+    /// No file at the path.
+    Absent,
+    /// The file ran, and its output was not one `pnet X.Y.Z` line.
+    Unknown,
+    Semver(u64, u64, u64),
+}
+
+/// What `bootstrap` will do with `prefix/bin/pnet`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Install,
+    Keep,
+    Upgrade,
+    Refuse,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
-    pub copies: Vec<(PathBuf, PathBuf, CopyKind)>,
+    pub decision: Decision,
+    pub src: PathBuf,
+    pub dest: PathBuf,
+    pub installed: VersionProbe,
+    pub candidate: VersionProbe,
     pub start_sh: PathBuf,
     pub record: PathBuf,
 }
@@ -109,7 +127,10 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
                         opts.http_bind = it.next().ok_or("--http-bind needs an address")?.clone();
                     }
                     "--grade" => {
-                        let g = it.next().ok_or("--grade needs sg or dg")?.to_ascii_lowercase();
+                        let g = it
+                            .next()
+                            .ok_or("--grade needs sg or dg")?
+                            .to_ascii_lowercase();
                         if g != "sg" && g != "dg" {
                             return Err("--grade must be sg or dg".into());
                         }
@@ -120,7 +141,8 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
                             it.next().ok_or("--device-alias needs a name")?.clone();
                     }
                     "--user-alias" => {
-                        opts.setup.user_alias = it.next().ok_or("--user-alias needs a name")?.clone();
+                        opts.setup.user_alias =
+                            it.next().ok_or("--user-alias needs a name")?.clone();
                     }
                     "--connection-code" | "--invitation-code" => {
                         opts.setup.connection_code =
@@ -128,7 +150,9 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
                     }
                     "--sg-rank" => {
                         let rank = it.next().ok_or("--sg-rank needs a number")?;
-                        let n: u32 = rank.parse().map_err(|_| "--sg-rank must be a number >= 1")?;
+                        let n: u32 = rank
+                            .parse()
+                            .map_err(|_| "--sg-rank must be a number >= 1")?;
                         if n < 1 {
                             return Err("--sg-rank must be a number >= 1".into());
                         }
@@ -138,8 +162,10 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
                         opts.setup.hosts = it.next().ok_or("--hosts needs a host list")?.clone();
                     }
                     "--admin-password" => {
-                        opts.setup.admin_password =
-                            it.next().ok_or("--admin-password needs a password")?.clone();
+                        opts.setup.admin_password = it
+                            .next()
+                            .ok_or("--admin-password needs a password")?
+                            .clone();
                     }
                     "--key-passphrase" => {
                         let passphrase = it
@@ -160,9 +186,7 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
             }
             Ok(Cmd::Bootstrap(opts))
         }
-        other => Err(format!(
-            "unknown command {other:?} (try: bootstrap | help)"
-        )),
+        other => Err(format!("unknown command {other:?} (try: bootstrap | help)")),
     }
 }
 
@@ -170,7 +194,7 @@ pub fn help_text() -> &'static str {
     "pnet_installer — bootstrap pNet onto this machine\n\
      \n\
      Commands:\n\
-       bootstrap            Copy a local pnet binary, write node.env and start.sh, then start\n\
+       bootstrap            Install pnet, or replace it when the binary you brought is newer\n\
        help                 This text\n\
      \n\
      With no command, this help is printed. pnet_installer does not register\n\
@@ -180,7 +204,8 @@ pub fn help_text() -> &'static str {
        --from DIR           Directory containing the pnet binary\n\
                             (default: directory of this executable, if pnet is there)\n\
        --prefix DIR         Install prefix (default: ~/.pnet)\n\
-       --force              Overwrite an existing pnet binary\n\
+       --force              Replace bin/pnet when versions match or cannot be read\n\
+                            A newer installed pnet is still left in place\n\
        --no-start           Copy and write start.sh only\n\
        --dry-run            Print the plan, write nothing\n\
        --http-bind ADDR     PNET_HTTP_BIND for a server-grade portal (default 127.0.0.1)\n\
@@ -225,6 +250,10 @@ pub fn prepare_setup(opts: &mut Opts) -> Result<(), String> {
     if opts.dry_run || opts.no_setup || opts.setup.is_complete() {
         return Ok(());
     }
+    // A later run does not ask again and does not apply new flags over this file.
+    if opts.prefix.join("node.env").is_file() {
+        return Ok(());
+    }
     if std::io::stdin().is_terminal() {
         let stdin = std::io::stdin();
         let mut input = stdin.lock();
@@ -240,76 +269,154 @@ pub fn prepare_setup(opts: &mut Opts) -> Result<(), String> {
 
 pub fn plan(opts: &Opts) -> Result<Plan, String> {
     if !opts.from.is_dir() {
-        return Err(format!("--from is not a directory: {}", opts.from.display()));
+        return Err(format!(
+            "--from is not a directory: {}",
+            opts.from.display()
+        ));
     }
-    let bin_dir = opts.prefix.join("bin");
-    let mut copies = Vec::new();
-    for name in BINS {
-        let src = opts.from.join(name);
-        if !src.is_file() {
-            return Err(format!("missing {} in {}", name, opts.from.display()));
-        }
-        let dest = bin_dir.join(name);
-        let kind = if dest.is_file() {
-            if opts.force {
-                CopyKind::Overwrite
-            } else {
-                CopyKind::SkipExists
-            }
-        } else {
-            CopyKind::Copy
-        };
-        copies.push((src, dest, kind));
+    let src = opts.from.join(BINS[0]);
+    if !src.is_file() {
+        return Err(format!("missing {} in {}", BINS[0], opts.from.display()));
     }
+    let dest = opts.prefix.join("bin").join(BINS[0]);
+    let candidate = probe_version(&src)?;
+    let installed = if dest.is_file() {
+        probe_version(&dest)?
+    } else {
+        VersionProbe::Absent
+    };
     Ok(Plan {
-        copies,
+        decision: decide(installed.clone(), candidate.clone(), opts.force),
+        src,
+        dest,
+        installed,
+        candidate,
         start_sh: opts.prefix.join("start.sh"),
         record: opts.prefix.join("bootstrap.json"),
     })
 }
 
+/// Forward-only choice. `force` replaces an equal or unreadable installed
+/// binary. It does not replace a newer one.
+pub fn decide(installed: VersionProbe, candidate: VersionProbe, force: bool) -> Decision {
+    match installed {
+        VersionProbe::Absent => Decision::Install,
+        VersionProbe::Semver(imaj, imin, ipat) => match candidate {
+            VersionProbe::Semver(cmaj, cmin, cpat) => {
+                match (imaj, imin, ipat).cmp(&(cmaj, cmin, cpat)) {
+                    Ordering::Less => Decision::Upgrade,
+                    Ordering::Equal if force => Decision::Upgrade,
+                    Ordering::Equal => Decision::Keep,
+                    Ordering::Greater => Decision::Refuse,
+                }
+            }
+            VersionProbe::Unknown | VersionProbe::Absent if force => Decision::Upgrade,
+            VersionProbe::Unknown | VersionProbe::Absent => Decision::Keep,
+        },
+        VersionProbe::Unknown => match candidate {
+            VersionProbe::Semver(..) => Decision::Upgrade,
+            VersionProbe::Unknown | VersionProbe::Absent if force => Decision::Upgrade,
+            VersionProbe::Unknown | VersionProbe::Absent => Decision::Keep,
+        },
+    }
+}
+
+pub fn parse_version_output(stdout: &str) -> VersionProbe {
+    let line = stdout.trim();
+    let Some(rest) = line.strip_prefix("pnet ") else {
+        return VersionProbe::Unknown;
+    };
+    let mut parts = rest.split('.');
+    let (Some(major), Some(minor), Some(patch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return VersionProbe::Unknown;
+    };
+    if !rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
+        return VersionProbe::Unknown;
+    }
+    match (major.parse(), minor.parse(), patch.parse()) {
+        (Ok(major), Ok(minor), Ok(patch)) => VersionProbe::Semver(major, minor, patch),
+        _ => VersionProbe::Unknown,
+    }
+}
+
+fn version_label(v: &VersionProbe) -> String {
+    match v {
+        VersionProbe::Absent => "absent".into(),
+        VersionProbe::Unknown => "unknown".into(),
+        VersionProbe::Semver(major, minor, patch) => format!("{major}.{minor}.{patch}"),
+    }
+}
+
+fn decision_word(d: &Decision) -> &'static str {
+    match d {
+        Decision::Install => "install",
+        Decision::Keep => "keep",
+        Decision::Upgrade => "upgrade",
+        Decision::Refuse => "refuse",
+    }
+}
+
 pub fn execute(opts: &Opts, plan: &Plan) -> Result<String, String> {
     let mut log = String::new();
+    let word = decision_word(&plan.decision);
+    let installed = version_label(&plan.installed);
+    let candidate = version_label(&plan.candidate);
     if opts.dry_run {
         log.push_str("dry-run (no writes)\n");
-        for (src, dest, kind) in &plan.copies {
-            log.push_str(&format!(
-                "  {:?} {} -> {}\n",
-                kind,
-                src.display(),
-                dest.display()
-            ));
-        }
+        log.push_str(&format!(
+            "  {word} installed {installed} candidate {candidate}\n"
+        ));
+        log.push_str(&format!(
+            "  {} -> {}\n",
+            plan.src.display(),
+            plan.dest.display()
+        ));
         log.push_str(&format!("  write {}\n", plan.start_sh.display()));
         log.push_str(&format!("  write {}\n", plan.record.display()));
-        if opts.setup.is_complete() {
-            log.push_str(&format!("  write {}\n", opts.prefix.join("node.env").display()));
+        let env_path = opts.prefix.join("node.env");
+        if opts.setup.is_complete() && !env_path.exists() {
+            log.push_str(&format!("  write {}\n", env_path.display()));
         }
         return Ok(log);
+    }
+    if plan.decision == Decision::Refuse {
+        return Err(format!(
+            "installed pnet {installed} is newer than {} {candidate}; not replacing",
+            plan.src.display()
+        ));
+    }
+
+    // The running process keeps the binary it already opened. Stop it before
+    // the copy, including when --no-start was passed. A keep leaves it up.
+    if matches!(plan.decision, Decision::Install | Decision::Upgrade) {
+        stop_running(&opts.prefix)?;
     }
 
     fs::create_dir_all(opts.prefix.join("bin")).map_err(|e| e.to_string())?;
     fs::create_dir_all(opts.prefix.join("logs")).map_err(|e| e.to_string())?;
     fs::create_dir_all(opts.prefix.join("run")).map_err(|e| e.to_string())?;
 
-    for (src, dest, kind) in &plan.copies {
-        match kind {
-            CopyKind::SkipExists => {
-                log.push_str(&format!("keep {}\n", dest.display()));
-            }
-            CopyKind::Copy | CopyKind::Overwrite => {
-                fs::copy(src, dest).map_err(|e| format!("copy {}: {e}", src.display()))?;
-                chmod_755(dest)?;
-                log.push_str(&format!("{:?} {}\n", kind, dest.display()));
-            }
+    match plan.decision {
+        Decision::Keep => {
+            log.push_str(&format!("keep {}\n", plan.dest.display()));
         }
+        Decision::Install | Decision::Upgrade => {
+            copy_binary(&plan.src, &plan.dest)?;
+            chmod_755(&plan.dest)?;
+            log.push_str(&format!("{word} {}\n", plan.dest.display()));
+        }
+        Decision::Refuse => unreachable!("refuse returned above"),
     }
 
-    if opts.setup.is_complete() {
-        let env_path = opts.prefix.join("node.env");
+    let env_path = opts.prefix.join("node.env");
+    if opts.setup.is_complete() && !env_path.exists() {
         fs::write(&env_path, opts.setup.to_env()).map_err(|e| e.to_string())?;
         chmod_600(&env_path)?;
         log.push_str(&format!("wrote {}\n", env_path.display()));
+    } else if env_path.is_file() {
+        log.push_str(&format!("keep {}\n", env_path.display()));
     }
 
     let start = start_script(&opts.prefix, &opts.http_bind, &ready_line(opts));
@@ -318,11 +425,14 @@ pub fn execute(opts: &Opts, plan: &Plan) -> Result<String, String> {
     log.push_str(&format!("wrote {}\n", plan.start_sh.display()));
 
     let rec = format!(
-        "{{\n  \"installed_at\": {},\n  \"prefix\": {},\n  \"from\": {},\n  \"http_bind\": {}\n}}\n",
+        "{{\n  \"installed_at\": {},\n  \"prefix\": {},\n  \"from\": {},\n  \"http_bind\": {},\n  \"decision\": {},\n  \"installed_version\": {},\n  \"candidate_version\": {}\n}}\n",
         unix_now(),
         json_str(&opts.prefix.to_string_lossy()),
         json_str(&opts.from.to_string_lossy()),
         json_str(&opts.http_bind),
+        json_str(word),
+        json_str(&installed),
+        json_str(&candidate),
     );
     fs::write(&plan.record, rec).map_err(|e| e.to_string())?;
 
@@ -415,6 +525,184 @@ fn unix_now() -> u64 {
 
 fn json_str(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// How long to wait for `--version` before treating the binary as unversioned.
+/// An older `pnet` ignores the flag and starts the node, so the probe is
+/// killed instead of left running. Its home and ports are not the real node's.
+const PROBE_WAIT: Duration = Duration::from_secs(2);
+
+/// How long to wait after SIGTERM before refusing to replace the binary.
+const STOP_WAIT: Duration = Duration::from_secs(5);
+
+fn probe_version(path: &Path) -> Result<VersionProbe, String> {
+    if !path.is_file() {
+        return Ok(VersionProbe::Absent);
+    }
+    let home = std::env::temp_dir().join(format!(
+        "pnet-probe-{}-{}-{}",
+        std::process::id(),
+        unix_now(),
+        probe_seq()
+    ));
+    fs::create_dir_all(&home).map_err(|e| e.to_string())?;
+    let result = probe_version_in(path, &home);
+    let _ = fs::remove_dir_all(&home);
+    result
+}
+
+fn probe_seq() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    N.fetch_add(1, Ordering::Relaxed)
+}
+
+/// ETXTBSY. A binary that just exited, or a file that was just written, can
+/// refuse exec or replace for a moment.
+fn is_text_busy(err: &std::io::Error) -> bool {
+    err.raw_os_error() == Some(26)
+}
+
+fn spawn_probe(path: &Path, home: &Path) -> Result<std::process::Child, String> {
+    let mut last = String::new();
+    for _ in 0..25 {
+        match Command::new(path)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("PNET_UDP_PORT", "0")
+            .env("PNET_HTTP_PORT", "0")
+            .spawn()
+        {
+            Ok(child) => return Ok(child),
+            Err(e) if is_text_busy(&e) => {
+                last = e.to_string();
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                return Err(format!("could not run {} --version: {e}", path.display()));
+            }
+        }
+    }
+    Err(format!(
+        "could not run {} --version: {last}",
+        path.display()
+    ))
+}
+
+fn copy_binary(src: &Path, dest: &Path) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..25 {
+        match fs::copy(src, dest) {
+            Ok(_) => return Ok(()),
+            Err(e) if is_text_busy(&e) => {
+                last = e.to_string();
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(format!("copy {}: {e}", src.display())),
+        }
+    }
+    Err(format!("copy {}: {last}", src.display()))
+}
+
+fn probe_version_in(path: &Path, home: &Path) -> Result<VersionProbe, String> {
+    let mut child = spawn_probe(path, home)?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("no stdout from {}", path.display()))?;
+    let reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < PROBE_WAIT => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "could not wait on {} --version: {e}",
+                    path.display()
+                ));
+            }
+        }
+    };
+    let buf = reader.join().unwrap_or_default();
+    let Some(status) = status else {
+        return Ok(VersionProbe::Unknown);
+    };
+    if !status.success() {
+        return Ok(VersionProbe::Unknown);
+    }
+    let text = String::from_utf8_lossy(&buf);
+    Ok(parse_version_output(&text))
+}
+
+fn stop_running(prefix: &Path) -> Result<(), String> {
+    let pid_path = prefix.join("run/pnet.pid");
+    let text = match fs::read_to_string(&pid_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("read {}: {e}", pid_path.display())),
+    };
+    let Ok(pid) = text.trim().parse::<i32>() else {
+        return Ok(());
+    };
+    if pid <= 0 || !pid_alive(pid) {
+        return Ok(());
+    }
+    let status = Command::new("kill")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| format!("kill {pid}: {e}"))?;
+    if !status.success() && pid_alive(pid) {
+        return Err(format!(
+            "could not signal pnet pid {pid}; left the installed binary unchanged"
+        ));
+    }
+    let started = Instant::now();
+    while pid_alive(pid) {
+        if started.elapsed() >= STOP_WAIT {
+            return Err(format!(
+                "pnet pid {pid} did not exit; left the installed binary unchanged"
+            ));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+fn pid_alive(pid: i32) -> bool {
+    // A zombie has exited. `kill -0` still succeeds for the parent, which
+    // would make a replace wait forever in tests and in any process that has
+    // not reaped the child. The installer is not that parent when start.sh
+    // launched the node.
+    let status = match fs::read_to_string(format!("/proc/{pid}/status")) {
+        Ok(status) => status,
+        Err(_) => return false,
+    };
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("State:") {
+            return !rest.trim_start().starts_with('Z');
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -558,9 +846,12 @@ mod tests {
         assert!(!sh.contains("/setup"));
         assert!(prefix.join("bootstrap.json").is_file());
         assert!(!prefix.join("installer").exists());
-        // second run without --force keeps existing
+        // second run of two unversioned binaries keeps the installed file
         let p2 = plan(&o).unwrap();
-        assert!(p2.copies.iter().all(|c| c.2 == CopyKind::SkipExists));
+        assert_eq!(p2.decision, Decision::Keep);
+        let kept = fs::read(prefix.join("bin/pnet")).unwrap();
+        execute(&o, &p2).unwrap();
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), kept);
     }
 
     #[test]
@@ -595,7 +886,249 @@ mod tests {
         let sh = fs::read_to_string(prefix.join("start.sh")).unwrap();
         assert!(sh.contains("does not serve a website"));
         assert!(!sh.contains("/setup"));
-        let mode = fs::metadata(prefix.join("node.env")).unwrap().permissions().mode();
+        let mode = fs::metadata(prefix.join("node.env"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    fn version_script(version: &str) -> String {
+        format!("#!/bin/sh\necho 'pnet {version}'\n")
+    }
+
+    fn write_bin(dir: &Path, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        let path = dir.join("pnet");
+        fs::write(&path, body).unwrap();
+        chmod_755(&path).unwrap();
+    }
+
+    /// Kills `pid` on drop so a failed assertion does not leave a sleeper behind.
+    struct Kill(i32);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            let _ = Command::new("kill")
+                .args(["-9", &self.0.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    fn spawn_sleeper() -> (std::process::Child, Kill) {
+        let child = Command::new("sleep").arg("60").spawn().unwrap();
+        let kill = Kill(child.id() as i32);
+        (child, kill)
+    }
+
+    #[test]
+    fn parse_version_output_accepts_only_one_semver_line() {
+        assert_eq!(
+            parse_version_output("pnet 1.2.3\n"),
+            VersionProbe::Semver(1, 2, 3)
+        );
+        assert_eq!(parse_version_output("pnet\n"), VersionProbe::Unknown);
+        assert_eq!(parse_version_output("pnet 1.2\n"), VersionProbe::Unknown);
+        assert_eq!(
+            parse_version_output("pnet 1.2.3-rc.1\n"),
+            VersionProbe::Unknown
+        );
+        assert_eq!(
+            parse_version_output("pnet 1.2.3\nextra\n"),
+            VersionProbe::Unknown
+        );
+    }
+
+    #[test]
+    fn decide_matches_the_forward_only_table() {
+        let v1 = VersionProbe::Semver(1, 0, 0);
+        let v2 = VersionProbe::Semver(2, 0, 0);
+        assert_eq!(
+            decide(VersionProbe::Absent, v1.clone(), false),
+            Decision::Install
+        );
+        assert_eq!(decide(v1.clone(), v2.clone(), false), Decision::Upgrade);
+        assert_eq!(decide(v1.clone(), v1.clone(), false), Decision::Keep);
+        assert_eq!(decide(v1.clone(), v1.clone(), true), Decision::Upgrade);
+        assert_eq!(decide(v2.clone(), v1.clone(), false), Decision::Refuse);
+        assert_eq!(decide(v2.clone(), v1.clone(), true), Decision::Refuse);
+        assert_eq!(
+            decide(VersionProbe::Unknown, v1.clone(), false),
+            Decision::Upgrade
+        );
+        assert_eq!(
+            decide(v1.clone(), VersionProbe::Unknown, false),
+            Decision::Keep
+        );
+        assert_eq!(decide(v1, VersionProbe::Unknown, true), Decision::Upgrade);
+        assert_eq!(
+            decide(VersionProbe::Unknown, VersionProbe::Unknown, false),
+            Decision::Keep
+        );
+        assert_eq!(
+            decide(VersionProbe::Unknown, VersionProbe::Unknown, true),
+            Decision::Upgrade
+        );
+    }
+
+    fn installed(prefix: &Path, body: &str) {
+        write_bin(&prefix.join("bin"), body);
+    }
+
+    #[test]
+    fn upgrade_replaces_an_older_binary_and_stops_its_pid() {
+        let from = tmp();
+        write_bin(&from, &version_script("2.0.0"));
+        let prefix = tmp();
+        installed(&prefix, &version_script("1.0.0"));
+        let (child, _kill) = spawn_sleeper();
+        fs::create_dir_all(prefix.join("run")).unwrap();
+        fs::write(prefix.join("run/pnet.pid"), format!("{}\n", child.id())).unwrap();
+
+        let o = opts(prefix.clone(), from);
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Upgrade);
+        let log = execute(&o, &p).unwrap();
+        assert!(log.contains("upgrade "));
+        assert!(fs::read_to_string(prefix.join("bin/pnet"))
+            .unwrap()
+            .contains("2.0.0"));
+        assert!(!pid_alive(child.id() as i32));
+        let record = fs::read_to_string(prefix.join("bootstrap.json")).unwrap();
+        assert!(record.contains("\"decision\": \"upgrade\""));
+        assert!(record.contains("\"installed_version\": \"1.0.0\""));
+        assert!(record.contains("\"candidate_version\": \"2.0.0\""));
+    }
+
+    #[test]
+    fn refuse_leaves_a_newer_binary_and_its_process() {
+        let from = tmp();
+        write_bin(&from, &version_script("1.0.0"));
+        let prefix = tmp();
+        installed(&prefix, &version_script("2.0.0"));
+        let before = fs::read(prefix.join("bin/pnet")).unwrap();
+        let (child, _kill) = spawn_sleeper();
+        fs::create_dir_all(prefix.join("run")).unwrap();
+        fs::write(prefix.join("run/pnet.pid"), format!("{}\n", child.id())).unwrap();
+
+        let mut o = opts(prefix.clone(), from.clone());
+        o.force = true;
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Refuse);
+        let err = execute(&o, &p).unwrap_err();
+        assert!(err.contains("not replacing"), "{err}");
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), before);
+        assert!(pid_alive(child.id() as i32));
+        assert!(!prefix.join("start.sh").exists());
+
+        o.dry_run = true;
+        o.force = true;
+        let p = plan(&o).unwrap();
+        let log = execute(&o, &p).unwrap();
+        assert!(log.contains("refuse"));
+        assert!(log.contains("dry-run"));
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), before);
+    }
+
+    #[test]
+    fn equal_versions_stay_unless_force_and_node_env_is_written_once() {
+        let from = tmp();
+        write_bin(&from, "#!/bin/sh\n# candidate\necho 'pnet 1.0.0'\n");
+        let prefix = tmp();
+        installed(&prefix, "#!/bin/sh\n# installed\necho 'pnet 1.0.0'\n");
+        let before = fs::read(prefix.join("bin/pnet")).unwrap();
+
+        let mut o = opts(prefix.clone(), from);
+        o.setup.grade = "dg".into();
+        o.setup.device_alias = "laptop".into();
+        o.setup.connection_code = "INVITE".into();
+        o.setup.key_passphrase = "secret12".into();
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Keep);
+        execute(&o, &p).unwrap();
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), before);
+        let env = fs::read_to_string(prefix.join("node.env")).unwrap();
+        assert!(env.contains("secret12"));
+
+        o.setup.key_passphrase = "different-pass".into();
+        o.setup.device_alias = "other".into();
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Keep);
+        execute(&o, &p).unwrap();
+        assert_eq!(fs::read_to_string(prefix.join("node.env")).unwrap(), env);
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), before);
+
+        o.force = true;
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Upgrade);
+        execute(&o, &p).unwrap();
+        let replaced = fs::read_to_string(prefix.join("bin/pnet")).unwrap();
+        assert!(replaced.contains("# candidate"));
+        assert_eq!(fs::read_to_string(prefix.join("node.env")).unwrap(), env);
+        prepare_setup(&mut o).unwrap();
+    }
+
+    #[test]
+    fn a_versioned_candidate_upgrades_an_unversioned_install() {
+        let from = tmp();
+        write_bin(&from, &version_script("0.2.0"));
+        let prefix = tmp();
+        installed(&prefix, "#!/bin/sh\necho pnet\n");
+        let o = opts(prefix.clone(), from);
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Upgrade);
+        execute(&o, &p).unwrap();
+        assert!(fs::read_to_string(prefix.join("bin/pnet"))
+            .unwrap()
+            .contains("0.2.0"));
+    }
+
+    #[test]
+    fn an_unversioned_candidate_does_not_replace_a_versioned_install() {
+        let from = tmp();
+        write_bin(&from, "#!/bin/sh\necho pnet\n");
+        let prefix = tmp();
+        installed(&prefix, &version_script("0.2.0"));
+        let before = fs::read(prefix.join("bin/pnet")).unwrap();
+        let o = opts(prefix.clone(), from);
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Keep);
+        execute(&o, &p).unwrap();
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), before);
+    }
+
+    #[test]
+    fn upgrade_does_not_copy_when_the_pid_will_not_exit() {
+        let from = tmp();
+        write_bin(&from, &version_script("2.0.0"));
+        let prefix = tmp();
+        installed(&prefix, &version_script("1.0.0"));
+        let before = fs::read(prefix.join("bin/pnet")).unwrap();
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while true; do sleep 0.2; done")
+            .spawn()
+            .unwrap();
+        let _kill = Kill(child.id() as i32);
+        fs::create_dir_all(prefix.join("run")).unwrap();
+        fs::write(prefix.join("run/pnet.pid"), format!("{}\n", child.id())).unwrap();
+
+        let o = opts(prefix.clone(), from);
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Upgrade);
+        let err = execute(&o, &p).unwrap_err();
+        assert!(err.contains("did not exit"), "{err}");
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), before);
+        assert!(pid_alive(child.id() as i32));
+    }
+
+    #[test]
+    fn existing_node_env_skips_the_setup_prompt() {
+        let prefix = tmp();
+        fs::write(prefix.join("node.env"), "PNET_GRADE='dg'\n").unwrap();
+        let mut o = opts(prefix, dummy_from());
+        o.start = true;
+        prepare_setup(&mut o).unwrap();
     }
 }
