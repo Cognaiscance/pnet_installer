@@ -18,6 +18,14 @@ run, then approve it in Config on that node.
 After a server-grade install, sign in at `http://127.0.0.1:8777/`. A
 device-grade node does not serve a website.
 
+A second run is planned as a forward-only upgrade: install `pnet` when it is
+missing, and replace it only when the binary you brought is newer. `node.env`
+and the node data stay in place. See
+[descriptions/forward-upgrade.md](descriptions/forward-upgrade.md). That
+behavior is not implemented yet. Today a second `bootstrap` keeps the
+existing binary unless you pass `--force`, which overwrites it with no
+version check.
+
 Windows bootstrap (install and run `pnet`) is planned in
 [descriptions/windows-bootstrap.md](descriptions/windows-bootstrap.md) and is
-not implemented yet.
+not implemented yet. It follows the same forward-only rule.
