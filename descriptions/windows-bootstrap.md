@@ -4,11 +4,14 @@
 (`start.sh`, `HOME`, Unix file modes).
 
 **Goal:** on Windows, `pnet_installer bootstrap` installs the local `pnet`
-binary and starts it in the user session, the same job `bootstrap` does on
-Linux today. First-run parameters are the same dialog or command-line flags
-as on Linux (`node.env`). A device-grade node does not bind a website. A
-server-grade portal is `http://127.0.0.1:8777/` after those parameters are
-applied — there is no `/setup` page.
+binary and starts it in the user session. First-run parameters are the same
+dialog or command-line flags as on Linux (`node.env`). A machine that already
+has `pnet` follows the forward-only rule in
+[forward-upgrade.md](forward-upgrade.md): a newer binary replaces the
+installed one, an older binary does not, and `node.env` is left in place.
+A device-grade node does not bind a website. A server-grade portal is
+`http://127.0.0.1:8777/` after those parameters are applied — there is no
+`/setup` page.
 
 The installer is not a pNet app. Bootstrap does not copy or start
 `pnet_installer`, and it does not install any other program.
@@ -44,7 +47,8 @@ feature (console close on Windows). Crypto and serde have no Unix-only crates.
 
 | Topic | Decision |
 |-------|----------|
-| Layout | `%USERPROFILE%\.pnet` (`bin\`, `logs\`, `run\`). If `HOME` is set (Git Bash), it wins, so one tree is shared. Override remains `--prefix`. |
+| Layout | `%USERPROFILE%\.pnet` (`bin\`, `logs\`, `run\`). If `HOME` is set (Git Bash), it wins, so one tree is shared. Override remains `--prefix`. One `pnet.exe`. No `versions\` tree. |
+| Already installed | The decision table in [forward-upgrade.md](forward-upgrade.md). Missing binary: copy it and write `node.env` when that file is missing. Upgrade: stop, replace, start. Downgrade: refuse, and leave the running node up. `--force` replaces an equal or unversioned binary and still refuses a downgrade. |
 | Binary | On Windows the file name is `pnet.exe`. Copy that name into `bin\`. Do not copy `pnet_installer.exe` into the prefix. |
 | Launch | Linux keeps `start.sh` unchanged (it starts `pnet` only). Windows starts `pnet.exe` from Rust: detached, new process group, stdout/stderr appended to `logs\pnet.log`, pid file `run\pnet.pid`. Skip a start when that pid is still alive (`OpenProcess` query; the Unix check stays `kill -0` inside `start.sh`). |
 | Stop | `pnet_installer stop` reads `run\pnet.pid` and terminates that process. Linux `start.sh` has no stop command; Windows has no `kill` for a pid file, so stop ships with the launcher. |
@@ -101,7 +105,7 @@ windows-sys = { version = "0.59", features = [
 - New subcommand `stop`. Unknown commands stay an error. `help` lists `stop`.
 - `stop` is a no-op success when the pid file is missing or the process is already gone.
 
-`--no-start` still copies `pnet` and writes `bootstrap.json`. On Windows it does not write `start.sh`. When setup parameters were collected, it also writes `node.env`. The next-step line points at the SG portal `http://<http-bind>:8777/` or, for device grade, says this node does not serve a website.
+`--no-start` still copies `pnet` when the forward-upgrade rule says to copy, and writes `bootstrap.json`. On Windows it does not write `start.sh`. `node.env` is written only when that file is missing and setup parameters were collected. The next-step line points at the SG portal `http://<http-bind>:8777/` or, for device grade, says this node does not serve a website. An upgrade with `--no-start` still stops the running process before replacing `pnet.exe`, and does not start it again.
 
 ### 5. Tests
 
@@ -129,7 +133,7 @@ A live spawn of the real node is not part of the unit tests (the fixtures are no
 2. On Windows, `cargo build --target x86_64-pc-windows-msvc` succeeds for this crate and for `pnet`.
 3. `pnet_installer.exe bootstrap --from <dir-with-pnet.exe> --no-start` fills `%USERPROFILE%\.pnet\bin` with `pnet.exe` only.
 4. Without `--no-start`, `pnet.exe` stays up after the bootstrap process exits and `logs\pnet.log` grows. A server-grade node answers `http://127.0.0.1:8777/`. A device-grade node does not listen on that port.
-5. A second bootstrap does not start a second `pnet.exe` while the pid is alive.
+5. A second bootstrap does not start a second `pnet.exe`. A newer `pnet.exe` replaces the installed one after the old process has exited. An older `pnet.exe` leaves the installed one running.
 6. `pnet_installer.exe stop` ends that process.
 7. pNet's `node.toml` is under `%USERPROFILE%\.pnet\data`, not the current directory.
 
@@ -139,6 +143,7 @@ A live spawn of the real node is not part of the unit tests (the fixtures are no
 
 - Installing or starting any program other than `pnet`.
 - A catalog, install desire, or package exec.
+- Several pNet versions on disk, or downloading a release (that fetch is phase E in [forward-upgrade.md](forward-upgrade.md)). Windows still installs from `--from` or from a `pnet.exe` beside the installer.
 - Per-user scheduled task at logon, Windows service, account, and recovery policy.
 - MSI / WiX, code signing, SmartScreen reputation.
 - macOS.

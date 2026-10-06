@@ -39,13 +39,23 @@ Default prefix `~/.pnet` (`bin/pnet`, `start.sh`, `node.env`, `logs/`). You ran 
 | `--from` | Directory containing the `pnet` binary |
 | `--http-bind` | `PNET_HTTP_BIND` for a server-grade portal (default `127.0.0.1`) |
 | `--no-start` | Write files and do not run `start.sh` |
-| `--force` | Overwrite an existing `bin/pnet` |
+| `--force` | Overwrite an existing `bin/pnet` with no version check |
 | `--dry-run` | Print the plan and write nothing |
+
+A second `bootstrap` keeps `bin/pnet` unless `--force`. `--force` replaces that file and does not compare versions. Passing setup parameters again rewrites `node.env`.
+
+## Upgrade
+
+One `pnet` binary lives under the prefix. Running the installer on a machine that already has pNet compares the installed binary with the one you brought. A newer binary replaces the older one, then the node is started again. An older binary does not replace a newer one. `node.env` and `~/.pnet/data` stay where they are.
+
+That behavior is specified in [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md). It is not implemented. The code on `develop` is still the second-run rule in the table above.
 
 ## Non-goals
 
 - Running as a pNet app (no fabric alias, no portal mount)
 - A catalog, install desire, or package exec
 - Installing or starting any program other than `pnet`
+- Several pNet versions side by side, or a command that switches between them
+- The running `pnet` process downloading and replacing itself
 - systemd units (`start.sh` is enough)
 - Windows (see [descriptions/windows-bootstrap.md](descriptions/windows-bootstrap.md))
