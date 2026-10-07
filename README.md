@@ -27,10 +27,9 @@ replaces an equal or unreadable binary and still refuses a downgrade. The
 rules are in
 [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md).
 With no local binary, bootstrap downloads the latest published `pnet` for
-this machine and checks the archive sha256 before running it. No release tag
-has been published yet, so that download has no archive until `vX.Y.Z` is
-pushed. Pass `--from`, or place `pnet` next to this program, to skip the
-network.
+this machine and checks the archive sha256 before running it. The published
+release is `v0.1.0`. Pass `--from`, or place `pnet` next to this program, to
+skip the network.
 
 Windows bootstrap (install and run `pnet`) is planned in
 [descriptions/windows-bootstrap.md](descriptions/windows-bootstrap.md) and is

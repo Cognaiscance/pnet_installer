@@ -1,9 +1,7 @@
 # Forward upgrade
 
-**Status:** steps 1–3 are on `develop`. Step 4 is the pNet release workflow
-and script; no `vX.Y.Z` tag has been pushed, so no GitHub Release exists yet.
-Step 5 is what `bootstrap` does when you pass no `--from` and `pnet` is not
-beside this program. A live download waits on that tag. See
+**Status:** steps 1–5 are done. Tag `v0.1.0` is published. With no `--from`
+and no `pnet` beside this program, `bootstrap` downloads that release. See
 `pNet/descriptions/release-assets.md` and
 [description.md](../description.md). A binary that does not print
 `pnet X.Y.Z` is treated as having no version.
@@ -13,8 +11,8 @@ beside this program. A live download waits on that tag. See
 | 1. `pnet --version` | pNet `develop` | Done. |
 | 2. `format_version`, fail closed | pNet `develop` | Done. |
 | 3. Local forward upgrade | this repo `develop` | Done. |
-| 4. Release assets | pNet `develop` | Done as a workflow and script. No tag has been pushed. |
-| 5. Installer fetches the index | this repo | Done. A live download waits on the tag from step 4. |
+| 4. Release assets | pNet `v0.1.0` | Done. The GitHub Release has both Linux archives and `index.json`. |
+| 5. Installer fetches the index | this repo | Done. It downloads the latest published release. |
 
 **Goal:** running the installer is the install and the upgrade.
 
@@ -186,9 +184,8 @@ Not required for the local `--from` upgrade. Required before a machine can
 download `pnet`.
 
 The workflow and `scripts/release-assets.sh` are on pNet `develop`
-(`descriptions/release-assets.md`). `Cargo.toml` is `0.1.0`. No release tag
-has been pushed, so the installer still has nothing to download. Pushing
-`v0.1.0` is what publishes the archives. `develop` is not a version.
+(`descriptions/release-assets.md`). Tag `v0.1.0` is published. `Cargo.toml`
+is `0.1.0`. `develop` is not a version the installer installs.
 
 One archive per version per target, plus a checksum. A target is operating
 system + CPU + C library. A release binary dynamically links glibc and
@@ -275,8 +272,7 @@ In `src/bootstrap.rs`:
 
 ### 4. pNet: release assets
 
-**Done** as the workflow and script on pNet `develop`. The first tag has not
-been pushed.
+**Done.** Tag `v0.1.0` is published.
 
 Repo: `pNet`. When a version should be installable on a machine that does
 not have a local build.
@@ -292,9 +288,9 @@ and hashes are what the installer checks.
 
 ### 5. Installer: fetch the latest binary
 
-**Done** in this repo. `bootstrap` fetches the index when it has no local
-candidate. A machine still cannot download `pnet` until a release tag is
-pushed. The index layout is `pNet/descriptions/release-assets.md`.
+**Done.** `bootstrap` downloads the latest release when it has no local
+candidate. The published tag is `v0.1.0`. The index layout is
+`pNet/descriptions/release-assets.md`.
 
 Repo: `pnet_installer`. Depends on step 4.
 

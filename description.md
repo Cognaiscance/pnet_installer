@@ -56,7 +56,7 @@ One `pnet` binary lives under the prefix. `bootstrap` runs `<binary> --version` 
 
 `node.env` is written only when it is missing. A later run does not prompt and does not apply new setup flags over that file. The installer does not read or write `~/.pnet/data`.
 
-With no `--from` and no `pnet` beside this program, bootstrap downloads the index of the latest pNet release, unpacks the archive for this machine, and checks its sha256 before it runs that file. `--from`, or a `pnet` next to this program, is used as-is and does not contact the network. The downloaded version is written to `bootstrap.json` as `release_version`. A published `vX.Y.Z` tag is what creates that release. Until one is pushed, this path has nothing to download, and `--from` is how you install a binary you already built. The rules are in [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md).
+With no `--from` and no `pnet` beside this program, bootstrap downloads the index of the latest pNet release, unpacks the archive for this machine, and checks its sha256 before it runs that file. `--from`, or a `pnet` next to this program, is used as-is and does not contact the network. The downloaded version is written to `bootstrap.json` as `release_version`. The published release is `v0.1.0`. `--from` still installs a binary you already built. The rules are in [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md).
 
 ## Non-goals
 
