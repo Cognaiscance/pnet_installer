@@ -1,8 +1,9 @@
 # pNet installer
 
-`pnet_installer bootstrap` installs **pNet** from a **local** binary directory
-(unpacked dist, or `target/debug` after `cargo build`). It does not download
-packages, and it does not register as a pNet app.
+`pnet_installer bootstrap` installs **pNet** from a local binary directory
+(unpacked dist, or `target/debug` after `cargo build`), or from the latest
+published pNet release when you do not have one. It does not download other
+programs, and it does not register as a pNet app.
 
 The person who wants an app on a device starts that app there. The app
 registers with the local node. Approval stays on that device (Config → Pending
@@ -17,7 +18,8 @@ cargo build
 ```
 
 `--from` is the directory that contains `pnet`. When that binary sits next to
-`pnet_installer`, `--from` can be omitted.
+`pnet_installer`, `--from` can be omitted. When neither is present, bootstrap
+downloads the latest published release for this machine.
 
 On a terminal, bootstrap asks what this machine is before it starts `pnet`:
 
@@ -54,7 +56,7 @@ One `pnet` binary lives under the prefix. `bootstrap` runs `<binary> --version` 
 
 `node.env` is written only when it is missing. A later run does not prompt and does not apply new setup flags over that file. The installer does not read or write `~/.pnet/data`.
 
-Fetching a published release, when you have no local binary, is specified in [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md) and is not implemented. `--from` (or a `pnet` beside this program) is still required.
+With no `--from` and no `pnet` beside this program, bootstrap downloads the index of the latest pNet release, unpacks the archive for this machine, and checks its sha256 before it runs that file. `--from`, or a `pnet` next to this program, is used as-is and does not contact the network. The downloaded version is written to `bootstrap.json` as `release_version`. A published `vX.Y.Z` tag is what creates that release. Until one is pushed, this path has nothing to download, and `--from` is how you install a binary you already built. The rules are in [descriptions/forward-upgrade.md](descriptions/forward-upgrade.md).
 
 ## Non-goals
 

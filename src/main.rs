@@ -1,7 +1,7 @@
 //! pnet_installer — bootstrap pNet onto this machine.
 //!
-//! Copies a local `pnet` binary, writes first-run parameters, and starts the
-//! node. This program does not register as a pNet app.
+//! Copies a local or downloaded `pnet` binary, writes first-run parameters,
+//! and starts the node. This program does not register as a pNet app.
 
 use std::path::PathBuf;
 
@@ -19,11 +19,15 @@ fn main() {
                 eprintln!("[bootstrap] {e}");
                 std::process::exit(1);
             }
-            if let Err(e) = bootstrap::prepare_setup(&mut opts) {
-                eprintln!("[bootstrap] {e}");
-                std::process::exit(1);
+            let outcome = (|| {
+                bootstrap::prepare_setup(&mut opts)?;
+                let plan = bootstrap::plan(&opts)?;
+                bootstrap::execute(&opts, &plan)
+            })();
+            if let Some(staged) = opts.staged.as_ref() {
+                let _ = std::fs::remove_dir_all(&staged.dir);
             }
-            match bootstrap::plan(&opts).and_then(|p| bootstrap::execute(&opts, &p)) {
+            match outcome {
                 Ok(log) => print!("{log}"),
                 Err(e) => {
                     eprintln!("[bootstrap] {e}");
