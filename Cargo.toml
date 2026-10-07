@@ -2,7 +2,7 @@
 name = "pnet_installer"
 version = "0.1.0"
 edition = "2021"
-description = "Bootstrap pNet onto this machine from a local binary"
+description = "Bootstrap pNet onto this machine"
 
 [lib]
 name = "pnet_installer"
@@ -14,3 +14,11 @@ path = "src/main.rs"
 
 [dev-dependencies]
 getrandom = "0.2"
+
+[dependencies]
+flate2 = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = "0.4"
+ureq = { version = "2.12.1", default-features = false, features = ["tls", "proxy-from-env"] }

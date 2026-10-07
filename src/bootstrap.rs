@@ -1,9 +1,10 @@
-//! Empty-machine bootstrap — install `pnet` from a local binary directory,
-//! or replace it when that binary is newer, then optionally start it.
+//! Empty-machine bootstrap — install `pnet` from a local binary directory or
+//! from the latest published release, then replace it when that binary is
+//! newer.
 //!
-//! Does not fetch packages and does not install any other program. The user
-//! points at a folder that already contains `pnet` (unpacked dist, or
-//! `target/debug` after `cargo build`).
+//! Does not install any program other than `pnet`. `--from`, or a `pnet`
+//! sitting next to this executable, is the candidate and does not contact
+//! the network.
 
 use std::cmp::Ordering;
 use std::fs;
@@ -29,6 +30,8 @@ pub struct Opts {
     /// When set, copy binaries and do not ask for node parameters.
     pub no_setup: bool,
     pub setup: NodeSetup,
+    /// Set when the candidate was downloaded. The caller removes `dir`.
+    pub staged: Option<crate::release::StagedRelease>,
 }
 
 /// Result of asking a binary for `pnet X.Y.Z`.
@@ -110,6 +113,7 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
                 http_bind: "127.0.0.1".into(),
                 no_setup: false,
                 setup: NodeSetup::default(),
+                staged: None,
             };
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -194,7 +198,7 @@ pub fn help_text() -> &'static str {
     "pnet_installer — bootstrap pNet onto this machine\n\
      \n\
      Commands:\n\
-       bootstrap            Install pnet, or replace it when the binary you brought is newer\n\
+       bootstrap            Install pnet, or replace it when the candidate is newer\n\
        help                 This text\n\
      \n\
      With no command, this help is printed. pnet_installer does not register\n\
@@ -202,7 +206,8 @@ pub fn help_text() -> &'static str {
      \n\
      bootstrap flags:\n\
        --from DIR           Directory containing the pnet binary\n\
-                            (default: directory of this executable, if pnet is there)\n\
+                            (default: a pnet next to this program, otherwise\n\
+                            the latest published release for this machine)\n\
        --prefix DIR         Install prefix (default: ~/.pnet)\n\
        --force              Replace bin/pnet when versions match or cannot be read\n\
                             A newer installed pnet is still left in place\n\
@@ -231,13 +236,35 @@ pub fn help_text() -> &'static str {
 }
 
 pub fn resolve_from(opts: &mut Opts, current_exe: &Path) -> Result<(), String> {
-    if opts.from.as_os_str().is_empty() {
-        opts.from = infer_from(current_exe).ok_or_else(|| {
-            "no --from DIR and pnet is not next to this binary\n\
-             Unpack a dist folder that contains pnet and pass --from, or point --from at target/debug after cargo build."
-                .to_string()
-        })?;
+    resolve_from_with(
+        opts,
+        current_exe,
+        &crate::release::UreqFetch,
+        crate::release::DEFAULT_INDEX_URL,
+    )
+}
+
+/// Fill `opts.from` without contacting the network when a local `pnet` exists.
+///
+/// `fetch` is used only when `--from` is empty and `current_exe`'s directory
+/// has no `pnet`. The downloaded file is checked before it is written.
+pub fn resolve_from_with(
+    opts: &mut Opts,
+    current_exe: &Path,
+    fetch: &dyn crate::release::ReleaseFetch,
+    index_url: &str,
+) -> Result<(), String> {
+    if !opts.from.as_os_str().is_empty() {
+        return Ok(());
     }
+    if let Some(dir) = infer_from(current_exe) {
+        opts.from = dir;
+        return Ok(());
+    }
+    let target = crate::release::host_target()?;
+    let staged = crate::release::stage_release(fetch, index_url, target, &std::env::temp_dir())?;
+    opts.from = staged.dir.clone();
+    opts.staged = Some(staged);
     Ok(())
 }
 
@@ -424,8 +451,8 @@ pub fn execute(opts: &Opts, plan: &Plan) -> Result<String, String> {
     chmod_755(&plan.start_sh)?;
     log.push_str(&format!("wrote {}\n", plan.start_sh.display()));
 
-    let rec = format!(
-        "{{\n  \"installed_at\": {},\n  \"prefix\": {},\n  \"from\": {},\n  \"http_bind\": {},\n  \"decision\": {},\n  \"installed_version\": {},\n  \"candidate_version\": {}\n}}\n",
+    let mut rec = format!(
+        "{{\n  \"installed_at\": {},\n  \"prefix\": {},\n  \"from\": {},\n  \"http_bind\": {},\n  \"decision\": {},\n  \"installed_version\": {},\n  \"candidate_version\": {}",
         unix_now(),
         json_str(&opts.prefix.to_string_lossy()),
         json_str(&opts.from.to_string_lossy()),
@@ -434,6 +461,14 @@ pub fn execute(opts: &Opts, plan: &Plan) -> Result<String, String> {
         json_str(&installed),
         json_str(&candidate),
     );
+    if let Some(staged) = &opts.staged {
+        rec.push_str(&format!(
+            ",\n  \"release_version\": {},\n  \"release_target\": {}",
+            json_str(&staged.version),
+            json_str(&staged.target),
+        ));
+    }
+    rec.push_str("\n}\n");
     fs::write(&plan.record, rec).map_err(|e| e.to_string())?;
 
     if opts.start {
@@ -735,11 +770,13 @@ mod tests {
             http_bind: "127.0.0.1".into(),
             no_setup: false,
             setup: NodeSetup::default(),
+            staged: None,
         }
     }
 
     #[test]
     fn parse_help_default_and_bootstrap_flags() {
+        assert!(help_text().contains("latest published release"));
         assert_eq!(parse_args(&["pnet_installer".into()]).unwrap(), Cmd::Help);
         assert!(parse_args(&["pnet_installer".into(), "run".into()])
             .unwrap_err()
@@ -1130,5 +1167,130 @@ mod tests {
         let mut o = opts(prefix, dummy_from());
         o.start = true;
         prepare_setup(&mut o).unwrap();
+    }
+
+    struct Boom;
+    impl crate::release::ReleaseFetch for Boom {
+        fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+            Err(format!("network contacted: {url}"))
+        }
+    }
+
+    #[test]
+    fn a_local_candidate_does_not_download() {
+        let from = dummy_from();
+        let mut o = opts(tmp(), from.clone());
+        resolve_from_with(
+            &mut o,
+            Path::new("/no/such/installer"),
+            &Boom,
+            crate::release::DEFAULT_INDEX_URL,
+        )
+        .unwrap();
+        assert_eq!(o.from, from);
+        assert!(o.staged.is_none());
+
+        let sibling = dummy_from();
+        let mut o = opts(tmp(), PathBuf::new());
+        resolve_from_with(
+            &mut o,
+            &sibling.join("pnet_installer"),
+            &Boom,
+            crate::release::DEFAULT_INDEX_URL,
+        )
+        .unwrap();
+        assert_eq!(o.from, sibling);
+        assert!(o.staged.is_none());
+        let _ = fs::remove_dir_all(&from);
+        let _ = fs::remove_dir_all(&sibling);
+    }
+
+    struct BytesFetch {
+        index: Vec<u8>,
+        archive: Vec<u8>,
+    }
+
+    impl crate::release::ReleaseFetch for BytesFetch {
+        fn get(&self, url: &str) -> Result<Vec<u8>, String> {
+            if url.ends_with("/index.json") {
+                Ok(self.index.clone())
+            } else {
+                Ok(self.archive.clone())
+            }
+        }
+    }
+
+    #[test]
+    fn a_downloaded_candidate_is_installed_and_recorded() {
+        let body = b"#!/bin/sh\necho 'pnet 1.4.0'\n";
+        let archive = crate::release::archive_with_pnet(body);
+        let target = crate::release::host_target().expect("linux test host");
+        let sha = {
+            use sha2::{Digest, Sha256};
+            let digest = Sha256::digest(&archive);
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let index = format!(
+            r#"{{"version":"1.4.0","tag":"v1.4.0","assets":[{{"target":"{target}","name":"pnet-1.4.0-{target}.tar.gz","url":"https://releases.example/pnet.tar.gz","sha256":"{sha}"}}]}}"#
+        );
+        let fetch = BytesFetch {
+            index: index.into_bytes(),
+            archive,
+        };
+        let prefix = tmp();
+        let mut o = opts(prefix.clone(), PathBuf::new());
+        let exe_dir = tmp();
+        resolve_from_with(
+            &mut o,
+            &exe_dir.join("pnet_installer"),
+            &fetch,
+            "https://releases.example/index.json",
+        )
+        .unwrap();
+        let staged_dir = o.staged.as_ref().unwrap().dir.clone();
+        let p = plan(&o).unwrap();
+        assert_eq!(p.decision, Decision::Install);
+        execute(&o, &p).unwrap();
+        assert_eq!(fs::read(prefix.join("bin/pnet")).unwrap(), body);
+        let record = fs::read_to_string(prefix.join("bootstrap.json")).unwrap();
+        assert!(
+            record.contains("\"release_version\": \"1.4.0\""),
+            "{record}"
+        );
+        assert!(
+            record.contains(&format!("\"release_target\": \"{target}\"")),
+            "{record}"
+        );
+        let _ = fs::remove_dir_all(&staged_dir);
+        let _ = fs::remove_dir_all(&prefix);
+        let _ = fs::remove_dir_all(&exe_dir);
+    }
+
+    #[test]
+    fn a_bad_download_hash_does_not_become_the_candidate() {
+        let archive = crate::release::archive_with_pnet(b"#!/bin/sh\necho 'pnet 1.4.0'\n");
+        let target = crate::release::host_target().expect("linux test host");
+        let index = format!(
+            r#"{{"version":"1.4.0","tag":"v1.4.0","assets":[{{"target":"{target}","name":"pnet-1.4.0-{target}.tar.gz","url":"https://releases.example/pnet.tar.gz","sha256":"{}"}}]}}"#,
+            "ab".repeat(32)
+        );
+        let fetch = BytesFetch {
+            index: index.into_bytes(),
+            archive,
+        };
+        let mut o = opts(tmp(), PathBuf::new());
+        let err = resolve_from_with(
+            &mut o,
+            Path::new("/no/such/installer"),
+            &fetch,
+            "https://releases.example/index.json",
+        )
+        .unwrap_err();
+        assert!(err.contains("sha256"), "{err}");
+        assert!(o.staged.is_none());
+        assert!(o.from.as_os_str().is_empty());
     }
 }

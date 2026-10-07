@@ -143,7 +143,7 @@ A live spawn of the real node is not part of the unit tests (the fixtures are no
 
 - Installing or starting any program other than `pnet`.
 - A catalog, install desire, or package exec.
-- Several pNet versions on disk, or downloading a release (that fetch is phase E in [forward-upgrade.md](forward-upgrade.md)). Windows still installs from `--from` or from a `pnet.exe` beside the installer.
+- Several pNet versions on disk. Linux can download a published release ([forward-upgrade.md](forward-upgrade.md)). Windows still installs from `--from` or from a `pnet.exe` beside the installer, and does not download.
 - Per-user scheduled task at logon, Windows service, account, and recovery policy.
 - MSI / WiX, code signing, SmartScreen reputation.
 - macOS.
