@@ -237,8 +237,8 @@ fn unique_dir(parent: &Path) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Unpack only a regular file whose tar path is exactly `pnet`. The output
-/// path is `dir/pnet`, never the path stored in the archive.
+/// Unpack `pnet`, `pnet-dg`, and `pnet-sg`. Other names are ignored.
+/// Each output path is the file name only, never a path from the archive.
 fn extract_pnet(bytes: &[u8], dir: &Path) -> Result<(), String> {
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
@@ -252,14 +252,11 @@ fn extract_pnet(bytes: &[u8], dir: &Path) -> Result<(), String> {
             .path()
             .map_err(|e| format!("release archive: {e}"))?
             .into_owned();
-        if !is_pnet_path(&path) {
+        let Some(name) = release_member_name(&path) else {
             continue;
-        }
-        if wrote {
-            return Err("release archive contains more than one pnet file".into());
-        }
+        };
         if !entry.header().entry_type().is_file() {
-            return Err("pnet in the release archive is not a regular file".into());
+            return Err(format!("{name} in the release archive is not a regular file"));
         }
         let size = entry
             .header()
@@ -270,7 +267,7 @@ fn extract_pnet(bytes: &[u8], dir: &Path) -> Result<(), String> {
                 "pnet in the release archive is larger than {MAX_BYTES} bytes"
             ));
         }
-        let partial = dir.join("pnet.partial");
+        let partial = dir.join(format!("{name}.partial"));
         let mut file = fs::File::create(&partial).map_err(|e| e.to_string())?;
         let n = io::copy(&mut (&mut entry).take(MAX_BYTES as u64 + 1), &mut file)
             .map_err(|e| format!("release archive: {e}"))?;
@@ -281,28 +278,81 @@ fn extract_pnet(bytes: &[u8], dir: &Path) -> Result<(), String> {
                 "pnet in the release archive is larger than {MAX_BYTES} bytes"
             ));
         }
-        let dest = dir.join("pnet");
+        let dest = dir.join(name);
+        if dest.exists() {
+            return Err(format!("release archive contains more than one {name} file"));
+        }
         fs::rename(&partial, &dest).map_err(|e| e.to_string())?;
         fs::set_permissions(&dest, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
         wrote = true;
     }
     if !wrote {
-        return Err("release archive does not contain a file named pnet".into());
+        return Err("release archive does not contain pnet, pnet-dg, or pnet-sg".into());
     }
     Ok(())
 }
 
-fn is_pnet_path(path: &Path) -> bool {
+fn release_member_name(path: &Path) -> Option<&str> {
     let parts: Vec<_> = path
         .components()
         .filter(|component| !matches!(component, Component::CurDir))
         .collect();
-    matches!(parts.as_slice(), [Component::Normal(name)] if *name == "pnet")
+    match parts.as_slice() {
+        [Component::Normal(name)] => {
+            let name = name.to_str()?;
+            matches!(name, "pnet" | "pnet-dg" | "pnet-sg").then_some(name)
+        }
+        _ => None,
+    }
+}
+
+/// Pick the binary for `grade` (`dg` or `sg`). A lone `pnet` file is used when
+/// the grade-specific file is absent, which is every archive published so far.
+pub fn select_source(dir: &Path, grade: Option<&str>) -> Result<PathBuf, String> {
+    let legacy = dir.join("pnet");
+    let specific = match grade {
+        Some("dg") => Some(dir.join("pnet-dg")),
+        Some("sg") => Some(dir.join("pnet-sg")),
+        Some(other) => return Err(format!("grade must be dg or sg, got {other}")),
+        None => None,
+    };
+    if let Some(path) = specific {
+        if path.is_file() {
+            return Ok(path);
+        }
+    }
+    if legacy.is_file() {
+        return Ok(legacy);
+    }
+    if dir.join("pnet-dg").is_file() || dir.join("pnet-sg").is_file() {
+        return Err(
+            "this release has separate device and server builds; pass --grade, or keep the existing node.env"
+                .into(),
+        );
+    }
+    Err(format!("missing pnet in {}", dir.display()))
 }
 
 #[cfg(test)]
 pub(crate) fn archive_with_pnet(body: &[u8]) -> Vec<u8> {
     archive_with_member("pnet", body, tar::EntryType::Regular)
+}
+
+#[cfg(test)]
+fn archive_with_members(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, body) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(body.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append(&header, *body).unwrap();
+    }
+    let raw = builder.into_inner().unwrap();
+    let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut gzip, &raw).unwrap();
+    gzip.finish().unwrap()
 }
 
 #[cfg(test)]
@@ -443,12 +493,13 @@ mod tests {
     }
 
     #[test]
-    fn only_an_exact_pnet_path_is_unpacked() {
-        assert!(is_pnet_path(Path::new("pnet")));
-        assert!(is_pnet_path(Path::new("./pnet")));
-        assert!(!is_pnet_path(Path::new("../pnet")));
-        assert!(!is_pnet_path(Path::new("dir/pnet")));
-        assert!(!is_pnet_path(Path::new("/pnet")));
+    fn only_an_exact_member_name_is_unpacked() {
+        assert_eq!(release_member_name(Path::new("pnet")), Some("pnet"));
+        assert_eq!(release_member_name(Path::new("./pnet-dg")), Some("pnet-dg"));
+        assert_eq!(release_member_name(Path::new("pnet-sg")), Some("pnet-sg"));
+        assert_eq!(release_member_name(Path::new("../pnet")), None);
+        assert_eq!(release_member_name(Path::new("dir/pnet")), None);
+        assert_eq!(release_member_name(Path::new("/pnet")), None);
     }
 
     #[test]
@@ -482,5 +533,37 @@ mod tests {
         assert!(select_asset(&dup, TARGET)
             .unwrap_err()
             .contains("lowercase"));
+    }
+
+    #[test]
+    fn split_archive_keeps_both_builds_and_selects_by_grade() {
+        let archive = archive_with_members(&[
+            ("pnet-dg", b"device-bytes"),
+            ("pnet-sg", b"server-bytes"),
+        ]);
+        let parent = tmp();
+        let staged = stage_release(&fetch_of(archive), INDEX, TARGET, &parent).unwrap();
+        assert_eq!(fs::read(staged.dir.join("pnet-dg")).unwrap(), b"device-bytes");
+        assert_eq!(fs::read(staged.dir.join("pnet-sg")).unwrap(), b"server-bytes");
+        assert!(!staged.dir.join("pnet").exists());
+        assert_eq!(
+            select_source(&staged.dir, Some("dg")).unwrap(),
+            staged.dir.join("pnet-dg")
+        );
+        assert_eq!(
+            select_source(&staged.dir, Some("sg")).unwrap(),
+            staged.dir.join("pnet-sg")
+        );
+        assert!(select_source(&staged.dir, None).unwrap_err().contains("--grade"));
+        let _ = fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn legacy_archive_selects_pnet_for_either_grade() {
+        let dir = tmp();
+        fs::write(dir.join("pnet"), b"one").unwrap();
+        assert_eq!(select_source(&dir, Some("dg")).unwrap(), dir.join("pnet"));
+        assert_eq!(select_source(&dir, None).unwrap(), dir.join("pnet"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

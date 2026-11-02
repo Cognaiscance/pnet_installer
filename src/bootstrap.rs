@@ -294,6 +294,30 @@ pub fn prepare_setup(opts: &mut Opts) -> Result<(), String> {
     Ok(())
 }
 
+/// Grade already stored in `node.env` wins. Otherwise the setup flags.
+/// The file contents are not logged.
+fn install_grade(opts: &Opts) -> Result<Option<String>, String> {
+    let path = opts.prefix.join("node.env");
+    if path.is_file() {
+        let text = fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("PNET_GRADE=") else {
+                continue;
+            };
+            let value = rest.trim().trim_matches(|c| c == '\'' || c == '"');
+            if value.eq_ignore_ascii_case("dg") {
+                return Ok(Some("dg".into()));
+            }
+            if value.eq_ignore_ascii_case("sg") {
+                return Ok(Some("sg".into()));
+            }
+        }
+        return Ok(None);
+    }
+    Ok(opts.setup.grade_normalized().map(str::to_string))
+}
+
 pub fn plan(opts: &Opts) -> Result<Plan, String> {
     if !opts.from.is_dir() {
         return Err(format!(
@@ -301,10 +325,8 @@ pub fn plan(opts: &Opts) -> Result<Plan, String> {
             opts.from.display()
         ));
     }
-    let src = opts.from.join(BINS[0]);
-    if !src.is_file() {
-        return Err(format!("missing {} in {}", BINS[0], opts.from.display()));
-    }
+    let grade = install_grade(opts)?;
+    let src = crate::release::select_source(&opts.from, grade.as_deref())?;
     let dest = opts.prefix.join("bin").join(BINS[0]);
     let candidate = probe_version(&src)?;
     let installed = if dest.is_file() {
@@ -350,7 +372,11 @@ pub fn decide(installed: VersionProbe, candidate: VersionProbe, force: bool) -> 
 
 pub fn parse_version_output(stdout: &str) -> VersionProbe {
     let line = stdout.trim();
-    let Some(rest) = line.strip_prefix("pnet ") else {
+    let Some(rest) = line
+        .strip_prefix("pnet-dg ")
+        .or_else(|| line.strip_prefix("pnet-sg "))
+        .or_else(|| line.strip_prefix("pnet "))
+    else {
         return VersionProbe::Unknown;
     };
     let mut parts = rest.split('.');
@@ -493,7 +519,7 @@ fn ready_line(opts: &Opts) -> String {
         return "pNet started without node.env. Re-run bootstrap with setup parameters.".into();
     }
     if opts.setup.grade_normalized() == Some("dg") {
-        "pNet started (device grade). This node does not serve a website.".into()
+        "pNet started (device grade). This node has no website. Apps are approved on a server portal.".into()
     } else if opts.setup.grade_normalized() == Some("sg") {
         format!("pNet started. Portal: http://{}:8777/", opts.http_bind)
     } else {
@@ -504,8 +530,8 @@ fn ready_line(opts: &Opts) -> String {
 fn next_steps(opts: &Opts) -> String {
     if opts.setup.is_complete() {
         if opts.setup.grade_normalized() == Some("dg") {
-            return "Device-grade node does not serve a website. Manage the network from a server-grade portal.\n\
-                 Start each app on this device yourself, then approve it in Config.\n"
+            return "This node has no website. Apps are approved on a server portal.\n\
+                 Start each app on this device yourself.\n"
                 .into();
         }
         if opts.setup.grade_normalized() == Some("sg") {
@@ -914,14 +940,16 @@ mod tests {
         o.setup.key_passphrase = "secret12".into();
         let p = plan(&o).unwrap();
         let log = execute(&o, &p).unwrap();
-        assert!(log.contains("does not serve a website"));
+        assert!(log.contains("has no website"));
+        assert!(log.contains("server portal"));
         let env = fs::read_to_string(prefix.join("node.env")).unwrap();
         assert!(env.contains("PNET_GRADE='dg'"));
         assert!(env.contains("PNET_INVITATION_CODE='INVITE'"));
         assert!(env.contains("PNET_DEVICE_ALIAS='laptop'"));
         assert!(env.contains("PNET_KEY_PASSPHRASE='secret12'"));
         let sh = fs::read_to_string(prefix.join("start.sh")).unwrap();
-        assert!(sh.contains("does not serve a website"));
+        assert!(sh.contains("has no website"));
+        assert!(sh.contains("server portal"));
         assert!(!sh.contains("/setup"));
         let mode = fs::metadata(prefix.join("node.env"))
             .unwrap()
@@ -963,6 +991,14 @@ mod tests {
     fn parse_version_output_accepts_only_one_semver_line() {
         assert_eq!(
             parse_version_output("pnet 1.2.3\n"),
+            VersionProbe::Semver(1, 2, 3),
+        );
+        assert_eq!(
+            parse_version_output("pnet-dg 1.2.3\n"),
+            VersionProbe::Semver(1, 2, 3),
+        );
+        assert_eq!(
+            parse_version_output("pnet-sg 1.2.3\n"),
             VersionProbe::Semver(1, 2, 3)
         );
         assert_eq!(parse_version_output("pnet\n"), VersionProbe::Unknown);
@@ -975,6 +1011,41 @@ mod tests {
             parse_version_output("pnet 1.2.3\nextra\n"),
             VersionProbe::Unknown
         );
+    }
+
+    #[test]
+    fn stored_grade_picks_the_build_over_setup_flags() {
+        let prefix = std::env::temp_dir().join(format!("pnet-grade-{}", std::process::id()));
+        let from = prefix.join("from");
+        let _ = fs::remove_dir_all(&prefix);
+        fs::create_dir_all(&from).unwrap();
+        fs::write(from.join("pnet-dg"), b"#!/bin/sh\necho 'pnet-dg 1.2.3'\n").unwrap();
+        fs::write(from.join("pnet-sg"), b"#!/bin/sh\necho 'pnet-sg 9.9.9'\n").unwrap();
+        chmod_755(&from.join("pnet-dg")).unwrap();
+        chmod_755(&from.join("pnet-sg")).unwrap();
+        fs::write(prefix.join("node.env"), "PNET_GRADE='dg'\n").unwrap();
+        let mut opts = Opts {
+            prefix: prefix.clone(),
+            from: from.clone(),
+            force: false,
+            start: false,
+            dry_run: true,
+            http_bind: "127.0.0.1".into(),
+            no_setup: true,
+            setup: crate::setup::NodeSetup {
+                grade: "sg".into(),
+                ..crate::setup::NodeSetup::default()
+            },
+            staged: None,
+        };
+        let plan = plan(&opts).unwrap();
+        assert_eq!(plan.src, from.join("pnet-dg"));
+        assert_eq!(plan.candidate, VersionProbe::Semver(1, 2, 3));
+        assert_eq!(plan.decision, Decision::Install);
+        let before = fs::read(&prefix.join("node.env")).unwrap();
+        let _ = execute(&opts, &plan).unwrap();
+        assert_eq!(fs::read(prefix.join("node.env")).unwrap(), before);
+        let _ = fs::remove_dir_all(&prefix);
     }
 
     #[test]
