@@ -13,23 +13,6 @@ fn main() {
         Ok(Cmd::Help) => {
             print!("{}", bootstrap::help_text());
         }
-        Ok(Cmd::TidyLogs { prefix, schedule }) => {
-            let logs = prefix.join("logs");
-            match pnet_installer::log_tidy::tidy(&logs) {
-                Ok(note) => print!("{note}"),
-                Err(e) => {
-                    eprintln!("[tidy-logs] {e}");
-                    std::process::exit(1);
-                }
-            }
-            if schedule {
-                let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pnet_installer"));
-                if let Err(e) = pnet_installer::log_tidy::install_crontab(&exe, &prefix) {
-                    eprintln!("[tidy-logs] {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
         Ok(Cmd::Bootstrap(mut opts)) => {
             let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("pnet_installer"));
             if let Err(e) = bootstrap::resolve_from(&mut opts, &exe) {

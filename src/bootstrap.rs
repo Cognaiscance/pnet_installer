@@ -67,7 +67,6 @@ pub struct Plan {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Cmd {
     Bootstrap(Opts),
-    TidyLogs { prefix: PathBuf, schedule: bool },
     Help,
 }
 
@@ -104,21 +103,6 @@ pub fn parse_args(args: &[String]) -> Result<Cmd, String> {
             );
         }
         "help" | "--help" | "-h" => Ok(Cmd::Help),
-        "tidy-logs" => {
-            let mut prefix = default_prefix();
-            let mut schedule = false;
-            while let Some(a) = it.next() {
-                match a.as_str() {
-                    "--prefix" => {
-                        prefix = PathBuf::from(it.next().ok_or("--prefix needs a path")?);
-                    }
-                    "--install-schedule" => schedule = true,
-                    "--help" | "-h" => return Ok(Cmd::Help),
-                    other => return Err(format!("unknown tidy-logs flag: {other}")),
-                }
-            }
-            Ok(Cmd::TidyLogs { prefix, schedule })
-        }
         "bootstrap" => {
             let mut opts = Opts {
                 prefix: default_prefix(),
@@ -215,7 +199,6 @@ pub fn help_text() -> &'static str {
      \n\
      Commands:\n\
        bootstrap            Install pnet, or replace it when the candidate is newer\n\
-       tidy-logs            Cap prefix/logs by size and delete archives older than 7 days\n\
        help                 This text\n\
      \n\
      With no command, this help is printed. pnet_installer does not register\n\
@@ -242,15 +225,6 @@ pub fn help_text() -> &'static str {
        --hosts LIST             Server grade reachable addresses (PNET_HOSTS)\n\
        --admin-password PASS    Server-grade portal password (at least 8 characters)\n\
        --key-passphrase PASS    Seals private keys (at least 8 characters; both grades)\n\
-     \n\
-     tidy-logs flags:\n\
-       --prefix DIR         Install prefix (default: ~/.pnet)\n\
-       --install-schedule   Add this user crontab: at boot and at 23:59\n\
-     \n\
-     A live log larger than 32 MiB keeps its last 1 MiB as a .log.gz archive,\n\
-     then the same file is truncated so a process that still has it open\n\
-     keeps writing there. At most four archives are kept per log, and any\n\
-     archive older than 7 days is removed.\n\
      \n\
      A device-grade node does not serve the website. The portal (default port\n\
      8777) is started only for server grade, after these parameters are applied.\n\
@@ -587,9 +561,6 @@ fn start_script(prefix: &Path, http_bind: &str, ready: &str) -> String {
          fi\n\
          export PNET_HTTP_BIND={http_bind}\n\
          mkdir -p \"$PREFIX/logs\" \"$PREFIX/run\"\n\
-         if [ -x \"$PREFIX/bin/pnet_installer\" ]; then\n\
-           \"$PREFIX/bin/pnet_installer\" tidy-logs --prefix \"$PREFIX\" || true\n\
-         fi\n\
          if [ ! -f \"$PREFIX/run/pnet.pid\" ] || ! kill -0 \"$(cat \"$PREFIX/run/pnet.pid\")\" 2>/dev/null; then\n\
            \"$PREFIX/bin/pnet\" >>\"$PREFIX/logs/pnet.log\" 2>&1 &\n\
            echo $! >\"$PREFIX/run/pnet.pid\"\n\
@@ -934,7 +905,7 @@ mod tests {
         assert!(sh.contains("PNET_HTTP_BIND=127.0.0.1"));
         assert!(sh.contains("node.env"));
         assert!(sh.contains("bin/pnet"));
-        assert!(sh.contains("pnet_installer\" tidy-logs"));
+        assert!(!sh.contains("pnet_installer"));
         assert!(!sh.contains("/setup"));
         assert!(prefix.join("bootstrap.json").is_file());
         assert!(!prefix.join("installer").exists());

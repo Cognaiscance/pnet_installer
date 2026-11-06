@@ -5,6 +5,5 @@
 //! a portal page, or install other programs.
 
 pub mod bootstrap;
-pub mod log_tidy;
 pub mod release;
 pub mod setup;
