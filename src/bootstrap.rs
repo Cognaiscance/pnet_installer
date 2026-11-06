@@ -41,7 +41,8 @@ pub enum VersionProbe {
     Absent,
     /// The file ran, and its output was not one `pnet X.Y.Z` line.
     Unknown,
-    Semver(u64, u64, u64),
+    /// major, minor, patch, and an optional fourth component (0 when absent).
+    Semver(u64, u64, u64, u64),
 }
 
 /// What `bootstrap` will do with `prefix/bin/pnet`.
@@ -350,9 +351,9 @@ pub fn plan(opts: &Opts) -> Result<Plan, String> {
 pub fn decide(installed: VersionProbe, candidate: VersionProbe, force: bool) -> Decision {
     match installed {
         VersionProbe::Absent => Decision::Install,
-        VersionProbe::Semver(imaj, imin, ipat) => match candidate {
-            VersionProbe::Semver(cmaj, cmin, cpat) => {
-                match (imaj, imin, ipat).cmp(&(cmaj, cmin, cpat)) {
+        VersionProbe::Semver(imaj, imin, ipat, ibuild) => match candidate {
+            VersionProbe::Semver(cmaj, cmin, cpat, cbuild) => {
+                match (imaj, imin, ipat, ibuild).cmp(&(cmaj, cmin, cpat, cbuild)) {
                     Ordering::Less => Decision::Upgrade,
                     Ordering::Equal if force => Decision::Upgrade,
                     Ordering::Equal => Decision::Keep,
@@ -380,16 +381,21 @@ pub fn parse_version_output(stdout: &str) -> VersionProbe {
         return VersionProbe::Unknown;
     };
     let mut parts = rest.split('.');
-    let (Some(major), Some(minor), Some(patch), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
+    let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next()) else {
         return VersionProbe::Unknown;
     };
+    let build = parts.next();
+    if parts.next().is_some() {
+        return VersionProbe::Unknown;
+    }
     if !rest.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
         return VersionProbe::Unknown;
     }
-    match (major.parse(), minor.parse(), patch.parse()) {
-        (Ok(major), Ok(minor), Ok(patch)) => VersionProbe::Semver(major, minor, patch),
+    let build = build.unwrap_or("0");
+    match (major.parse(), minor.parse(), patch.parse(), build.parse()) {
+        (Ok(major), Ok(minor), Ok(patch), Ok(build)) => {
+            VersionProbe::Semver(major, minor, patch, build)
+        }
         _ => VersionProbe::Unknown,
     }
 }
@@ -398,7 +404,13 @@ fn version_label(v: &VersionProbe) -> String {
     match v {
         VersionProbe::Absent => "absent".into(),
         VersionProbe::Unknown => "unknown".into(),
-        VersionProbe::Semver(major, minor, patch) => format!("{major}.{minor}.{patch}"),
+        VersionProbe::Semver(major, minor, patch, build) => {
+            if *build == 0 {
+                format!("{major}.{minor}.{patch}")
+            } else {
+                format!("{major}.{minor}.{patch}.{build}")
+            }
+        }
     }
 }
 
@@ -991,15 +1003,15 @@ mod tests {
     fn parse_version_output_accepts_only_one_semver_line() {
         assert_eq!(
             parse_version_output("pnet 1.2.3\n"),
-            VersionProbe::Semver(1, 2, 3),
+            VersionProbe::Semver(1, 2, 3, 0),
         );
         assert_eq!(
             parse_version_output("pnet-dg 1.2.3\n"),
-            VersionProbe::Semver(1, 2, 3),
+            VersionProbe::Semver(1, 2, 3, 0),
         );
         assert_eq!(
             parse_version_output("pnet-sg 1.2.3\n"),
-            VersionProbe::Semver(1, 2, 3)
+            VersionProbe::Semver(1, 2, 3, 0)
         );
         assert_eq!(parse_version_output("pnet\n"), VersionProbe::Unknown);
         assert_eq!(parse_version_output("pnet 1.2\n"), VersionProbe::Unknown);
@@ -1040,7 +1052,7 @@ mod tests {
         };
         let plan = plan(&opts).unwrap();
         assert_eq!(plan.src, from.join("pnet-dg"));
-        assert_eq!(plan.candidate, VersionProbe::Semver(1, 2, 3));
+        assert_eq!(plan.candidate, VersionProbe::Semver(1, 2, 3, 0));
         assert_eq!(plan.decision, Decision::Install);
         let before = fs::read(&prefix.join("node.env")).unwrap();
         let _ = execute(&opts, &plan).unwrap();
@@ -1050,8 +1062,8 @@ mod tests {
 
     #[test]
     fn decide_matches_the_forward_only_table() {
-        let v1 = VersionProbe::Semver(1, 0, 0);
-        let v2 = VersionProbe::Semver(2, 0, 0);
+        let v1 = VersionProbe::Semver(1, 0, 0, 0);
+        let v2 = VersionProbe::Semver(2, 0, 0, 0);
         assert_eq!(
             decide(VersionProbe::Absent, v1.clone(), false),
             Decision::Install

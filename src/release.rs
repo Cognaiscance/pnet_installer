@@ -190,13 +190,11 @@ fn is_https_url(url: &str) -> bool {
 }
 
 fn is_semver(version: &str) -> bool {
-    let mut parts = version.split('.');
-    let (Some(major), Some(minor), Some(patch), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() != 3 && parts.len() != 4 {
         return false;
-    };
-    [major, minor, patch]
+    }
+    parts
         .iter()
         .all(|part| !part.is_empty() && part.bytes().all(|ch| ch.is_ascii_digit()))
 }
